@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -128,8 +128,27 @@ pub(crate) struct FakeHttpServer {
     pub(crate) requests: Receiver<Request>,
 }
 
+pub(crate) struct HttpAnswer {
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(&'static str, String)>,
+    pub(crate) body: Vec<u8>,
+}
+
 impl FakeHttpServer {
     pub(crate) fn start(responses: Vec<(u16, String)>) -> Self {
+        Self::answering(
+            responses
+                .into_iter()
+                .map(|(status, body)| HttpAnswer {
+                    status,
+                    headers: Vec::new(),
+                    body: body.into_bytes(),
+                })
+                .collect(),
+        )
+    }
+
+    pub(crate) fn answering(answers: Vec<HttpAnswer>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!(
             "http://{}/v1/audio/transcriptions",
@@ -137,9 +156,9 @@ impl FakeHttpServer {
         );
         let (sender, requests) = mpsc::channel();
         thread::spawn(move || {
-            for (status, body) in responses {
+            for reply in answers {
                 let (stream, _) = listener.accept().unwrap();
-                let request = answer(stream, status, &body);
+                let request = answer(stream, &reply);
                 if sender.send(request).is_err() {
                     return;
                 }
@@ -149,8 +168,27 @@ impl FakeHttpServer {
     }
 }
 
-fn answer(stream: TcpStream, status: u16, body: &str) -> Request {
+fn answer(stream: TcpStream, reply: &HttpAnswer) -> Request {
     let mut reader = BufReader::new(stream);
+    let request = read_request(&mut reader);
+    let mut stream = reader.into_inner();
+    write!(
+        stream,
+        "HTTP/1.1 {} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+        reply.status,
+        reply.body.len()
+    )
+    .unwrap();
+    for (name, value) in &reply.headers {
+        write!(stream, "{name}: {value}\r\n").unwrap();
+    }
+    stream.write_all(b"\r\n").unwrap();
+    stream.write_all(&reply.body).unwrap();
+    stream.flush().unwrap();
+    request
+}
+
+pub(crate) fn read_request(reader: &mut impl BufRead) -> Request {
     let mut request_line = String::new();
     reader.read_line(&mut request_line).unwrap();
     let mut words = request_line.split_whitespace();
@@ -170,22 +208,13 @@ fn answer(stream: TcpStream, status: u16, body: &str) -> Request {
     let length: usize = headers
         .get("content-length")
         .map_or(0, |length| length.parse().unwrap());
-    let mut request_body = vec![0; length];
-    reader.read_exact(&mut request_body).unwrap();
-
-    let mut stream = reader.into_inner();
-    write!(
-        stream,
-        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
-    )
-    .unwrap();
-    stream.flush().unwrap();
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body).unwrap();
     Request {
         method,
         path,
         headers,
-        body: request_body,
+        body,
     }
 }
 

@@ -1,9 +1,11 @@
+use std::io::Read;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
-use ureq::Agent;
 use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+use ureq::{Agent, Body};
 
 use crate::config::FinalServerConfig;
 use crate::session::{BoxError, FinalServer, Recording};
@@ -11,8 +13,9 @@ use crate::wav;
 
 /// An OpenAI-compatible `/v1/audio/transcriptions` endpoint.
 ///
-/// The request carries no `language` field: the API has no value for automatic
-/// detection, and leaving the field out is what selects it.
+/// No `language` field: the API has no value for automatic detection, so leaving
+/// it out asks for it; a server with a default language of its own applies that
+/// instead.
 pub(crate) struct HttpFinalServer {
     agent: Agent,
     config: FinalServerConfig,
@@ -26,6 +29,24 @@ enum FinalServerError {
     Answer(#[from] serde_json::Error),
 }
 
+struct Timeouts {
+    connect: Duration,
+    write: Duration,
+    response: Duration,
+    body: Duration,
+}
+
+// A 15-minute recording is about 29 MB and its transcription can take minutes,
+// so these end only a server that has stopped, not a slow one.
+const TIMEOUTS: Timeouts = Timeouts {
+    connect: Duration::from_secs(10),
+    write: Duration::from_secs(60),
+    response: Duration::from_mins(10),
+    body: Duration::from_secs(60),
+};
+
+const ERROR_ANSWER_LIMIT: usize = 1000;
+
 #[derive(Deserialize)]
 struct Transcription {
     text: String,
@@ -33,16 +54,26 @@ struct Transcription {
 
 impl HttpFinalServer {
     pub(crate) fn new(config: FinalServerConfig) -> Self {
+        Self::with_timeouts(config, &TIMEOUTS)
+    }
+
+    fn with_timeouts(config: FinalServerConfig, timeouts: &Timeouts) -> Self {
         let tls = TlsConfig::builder()
             .provider(TlsProvider::Rustls)
             .root_certs(RootCerts::PlatformVerifier)
             .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
             .build();
-        // No proxy from the environment: the client connects to the configured endpoint only.
+        // No proxy from the environment and no redirects: the client connects to the
+        // configured endpoint only.
         let agent = Agent::config_builder()
             .tls_config(tls)
             .proxy(None)
+            .max_redirects(0)
             .http_status_as_error(false)
+            .timeout_connect(Some(timeouts.connect))
+            .timeout_per_write(Some(timeouts.write))
+            .timeout_recv_response(Some(timeouts.response))
+            .timeout_recv_body(Some(timeouts.body))
             .build()
             .new_agent();
         Self { agent, config }
@@ -62,18 +93,33 @@ impl FinalServer for HttpFinalServer {
         }
         let mut response = request.send(&body[..])?;
         let status = response.status();
-        let answer = response.body_mut().read_to_string()?;
         if !status.is_success() {
             return Err(FinalServerError::Status {
                 status: status.as_u16(),
-                body: answer,
+                body: error_answer(response.body_mut()),
             }
             .into());
         }
+        let answer = response.body_mut().read_to_string()?;
         let transcription: Transcription =
             serde_json::from_str(&answer).map_err(FinalServerError::from)?;
         Ok(transcription.text)
     }
+}
+
+fn error_answer(body: &mut Body) -> String {
+    let mut bytes = Vec::new();
+    let mut reader = body.as_reader().take(ERROR_ANSWER_LIMIT as u64 + 1);
+    if let Err(error) = reader.read_to_end(&mut bytes) {
+        return format!("(the answer cannot be read: {error})");
+    }
+    let cut = bytes.len() > ERROR_ANSWER_LIMIT;
+    bytes.truncate(ERROR_ANSWER_LIMIT);
+    let mut answer = String::from_utf8_lossy(&bytes).into_owned();
+    if cut {
+        answer.push('…');
+    }
+    answer
 }
 
 fn multipart(model: &str, wav: &[u8]) -> (String, Vec<u8>) {
@@ -113,11 +159,20 @@ fn boundary_absent_from(data: &[u8]) -> String {
 mod tests {
     use std::ffi::OsString;
     use std::fs;
+    use std::io::{self, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
-    use super::{HttpFinalServer, boundary_absent_from};
+    use super::{HttpFinalServer, TIMEOUTS, Timeouts, boundary_absent_from};
     use crate::config::{self, FinalServerConfig};
-    use crate::session::{FinalServer, Recording};
-    use crate::test_support::{Decoded, FakeHttpServer, Part, TempDir, decode};
+    use crate::session::{BoxError, FinalServer, Recording};
+    use crate::test_support::{
+        Decoded, FakeHttpServer, HttpAnswer, Part, TempDir, decode, read_request,
+    };
+
+    const SHORT: Duration = Duration::from_millis(300);
 
     fn server(url: &str, api_key: Option<&str>) -> HttpFinalServer {
         HttpFinalServer::new(FinalServerConfig {
@@ -125,6 +180,42 @@ mod tests {
             model: "whisper-large-v3".to_owned(),
             api_key: api_key.map(str::to_owned),
         })
+    }
+
+    fn with_timeouts(url: &str, timeouts: &Timeouts) -> HttpFinalServer {
+        HttpFinalServer::with_timeouts(
+            FinalServerConfig {
+                endpoint: url.to_owned(),
+                model: "whisper-large-v3".to_owned(),
+                api_key: None,
+            },
+            timeouts,
+        )
+    }
+
+    fn short_silence() -> Recording {
+        Recording {
+            samples: vec![0; 160],
+        }
+    }
+
+    /// Runs the request on its own thread, so a client that waits forever fails the test.
+    fn transcribe_within(
+        server: HttpFinalServer,
+        recording: Recording,
+        limit: Duration,
+    ) -> Result<String, String> {
+        let (sender, result) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = sender.send(
+                server
+                    .transcribe(&recording)
+                    .map_err(|error: BoxError| error.to_string()),
+            );
+        });
+        result
+            .recv_timeout(limit)
+            .expect("the request ended within the limit")
     }
 
     fn text_part(name: &str, value: &str) -> Part {
@@ -249,7 +340,7 @@ mod tests {
 
     #[test]
     fn an_unreachable_server_is_reported() {
-        let unused_port = std::net::TcpListener::bind("127.0.0.1:0")
+        let unused_port = TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
             .unwrap();
@@ -263,6 +354,142 @@ mod tests {
         });
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_redirect_is_not_followed() {
+        let elsewhere = TcpListener::bind("127.0.0.1:0").unwrap();
+        elsewhere.set_nonblocking(true).unwrap();
+        let fake = FakeHttpServer::answering(vec![HttpAnswer {
+            status: 302,
+            headers: vec![(
+                "Location",
+                format!("http://{}/elsewhere", elsewhere.local_addr().unwrap()),
+            )],
+            body: b"moved".to_vec(),
+        }]);
+
+        let result = transcribe_within(
+            server(&fake.url, None),
+            short_silence(),
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(result.unwrap_err(), "the final server answered 302: moved");
+        assert_eq!(
+            elsewhere.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock,
+            "nothing connected to the redirect's target"
+        );
+    }
+
+    #[test]
+    fn an_error_status_is_reported_even_when_its_answer_is_not_text() {
+        let fake = FakeHttpServer::answering(vec![HttpAnswer {
+            status: 502,
+            headers: Vec::new(),
+            body: vec![0xff, 0xfe, b'x'],
+        }]);
+
+        let error = server(&fake.url, None)
+            .transcribe(&short_silence())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "the final server answered 502: \u{fffd}\u{fffd}x"
+        );
+    }
+
+    #[test]
+    fn a_long_error_answer_is_cut_short() {
+        let fake = FakeHttpServer::start(vec![(500, "x".repeat(100_000))]);
+
+        let error = server(&fake.url, None)
+            .transcribe(&short_silence())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            format!("the final server answered 500: {}…", "x".repeat(1000))
+        );
+    }
+
+    #[test]
+    fn a_server_that_never_answers_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(&stream);
+            read_request(&mut reader);
+            thread::sleep(Duration::from_secs(30));
+        });
+        let timeouts = Timeouts {
+            response: SHORT,
+            ..TIMEOUTS
+        };
+
+        let result = transcribe_within(
+            with_timeouts(&url, &timeouts),
+            short_silence(),
+            Duration::from_secs(10),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("timeout"), "{error}");
+    }
+
+    #[test]
+    fn a_server_that_stops_reading_the_audio_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+        let timeouts = Timeouts {
+            write: SHORT,
+            ..TIMEOUTS
+        };
+
+        let result = transcribe_within(
+            with_timeouts(&url, &timeouts),
+            Recording {
+                samples: vec![0; 600 * 16_000],
+            },
+            Duration::from_secs(10),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("timeout"), "{error}");
+    }
+
+    #[test]
+    fn an_answer_that_stops_halfway_times_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut BufReader::new(&stream));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"text\"")
+                .unwrap();
+            thread::sleep(Duration::from_secs(30));
+        });
+        let timeouts = Timeouts {
+            body: SHORT,
+            ..TIMEOUTS
+        };
+
+        let result = transcribe_within(
+            with_timeouts(&url, &timeouts),
+            short_silence(),
+            Duration::from_secs(10),
+        );
+
+        let error = result.unwrap_err();
+        assert!(error.contains("timeout"), "{error}");
     }
 
     #[test]
