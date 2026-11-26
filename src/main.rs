@@ -73,7 +73,7 @@ fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
         config.max_recording,
     );
     eprintln!("copper-dictate: listening at {}", socket.display());
-    daemon::serve(&listener, &session)?;
+    daemon::serve(&listener, &session);
     Ok(())
 }
 

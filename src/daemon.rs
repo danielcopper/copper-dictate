@@ -5,12 +5,15 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use thiserror::Error;
 
 use crate::protocol::{Reply, Request};
 use crate::session::{Outcome, Session};
 use crate::xdg::{self, Env};
+
+const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Error)]
 #[error("XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place")]
@@ -54,42 +57,76 @@ pub(crate) fn bind(socket: &Path) -> Result<UnixListener, BindError> {
     }
 }
 
-pub(crate) fn serve(listener: &UnixListener, session: &Arc<Session>) -> io::Result<()> {
-    for connection in listener.incoming() {
-        let connection = connection?;
-        let session = Arc::clone(session);
-        thread::spawn(move || {
-            if let Err(error) = handle(&connection, &session) {
-                eprintln!("copper-dictate: a toggle's connection failed: {error}");
+pub(crate) fn serve(listener: &UnixListener, session: &Arc<Session>) {
+    serve_connections(listener.incoming(), session);
+}
+
+fn serve_connections(
+    connections: impl IntoIterator<Item = io::Result<UnixStream>>,
+    session: &Arc<Session>,
+) {
+    for connection in connections {
+        match connection {
+            Ok(connection) => {
+                let session = Arc::clone(session);
+                thread::spawn(move || {
+                    if let Err(error) = handle(&connection, &session) {
+                        eprintln!("copper-dictate: a toggle's connection failed: {error}");
+                    }
+                });
             }
-        });
+            Err(error) => {
+                eprintln!("copper-dictate: cannot accept a toggle's connection: {error}");
+                // Errors such as running out of file descriptors last a while; the pause keeps
+                // the loop from spinning through them.
+                thread::sleep(ACCEPT_RETRY);
+            }
+        }
     }
-    Ok(())
 }
 
 fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     let mut line = String::new();
-    BufReader::new(connection).read_line(&mut line)?;
-    let reply = match serde_json::from_str::<Request>(&line) {
-        Ok(Request::Toggle) => match session.toggle() {
-            Outcome::Started => Reply::Recording,
-            Outcome::Text(text) => Reply::Text { text },
-            Outcome::Failed(message) => Reply::Error { message },
-        },
-        Err(error) => Reply::Error {
-            message: format!("not a request: {error}"),
+    if BufReader::new(connection).read_line(&mut line)? == 0 {
+        return Ok(());
+    }
+    let outcome = match serde_json::from_str::<Request>(&line) {
+        Ok(Request::Toggle) => session.toggle(),
+        Err(error) => Outcome::Refused(format!("not a request: {error}")),
+    };
+    let reply = match &outcome {
+        Outcome::Started => Reply::Recording,
+        Outcome::Text(text) => Reply::Text { text: text.clone() },
+        Outcome::Refused(message) | Outcome::Failed(message) => Reply::Error {
+            message: message.clone(),
         },
     };
     let mut answer = serde_json::to_string(&reply)?;
     answer.push('\n');
     let mut connection = connection;
-    connection.write_all(answer.as_bytes())
+    let Err(error) = connection.write_all(answer.as_bytes()) else {
+        return Ok(());
+    };
+    let Some(transcript) = outcome.into_transcript() else {
+        return Err(error);
+    };
+    if session.keep(transcript) {
+        eprintln!(
+            "copper-dictate: the toggle went away before its final text arrived; the next toggle prints it"
+        );
+    } else {
+        eprintln!(
+            "copper-dictate: the toggle went away before its final text arrived, and a new dictation has begun; the text is lost"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::net::Shutdown;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
     use std::sync::Arc;
@@ -98,11 +135,13 @@ mod tests {
 
     use std::path::{Path, PathBuf};
 
-    use super::{BindError, bind, serve, socket_path};
+    use super::{BindError, bind, serve, serve_connections, socket_path};
     use crate::config::{ApiKey, FinalServerConfig};
     use crate::final_server::HttpFinalServer;
     use crate::session::Session;
-    use crate::test_support::{FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode};
+    use crate::test_support::{
+        FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode, wait_until,
+    };
     use crate::toggle;
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
@@ -278,6 +317,72 @@ mod tests {
             line.starts_with(r#"{"event":"error","message":"not a request"#),
             "{line}"
         );
+    }
+
+    #[test]
+    fn a_text_whose_toggle_went_away_is_printed_by_the_next_toggle() {
+        let (microphone, events) = FakeMicrophone::new(vec![1]);
+        let (final_server, release) = FakeFinalServer::answering(&[Ok("kept for later")]).held();
+        let received = final_server.received.clone();
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let daemon = Daemon::start(Arc::clone(&session));
+        daemon.toggle();
+        let mut gone = UnixStream::connect(socket_in(&daemon.runtime_dir)).unwrap();
+        gone.write_all(b"{\"command\":\"toggle\"}\n").unwrap();
+        wait_until(|| !received.lock().unwrap().is_empty());
+
+        drop(gone);
+        release.send(()).unwrap();
+        wait_until(|| session.holds_a_transcript());
+
+        assert_eq!(
+            daemon.toggle(),
+            (true, "kept for later\n".to_owned(), String::new())
+        );
+        assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
+    }
+
+    #[test]
+    fn an_accept_error_does_not_end_the_daemon() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(FakeFinalServer::answering(&[])),
+            NO_LIMIT,
+        );
+        let (client, accepted) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            serve_connections(
+                [
+                    Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+                    Ok(accepted),
+                ],
+                &session,
+            );
+        });
+
+        (&client).write_all(b"{\"command\":\"toggle\"}\n").unwrap();
+        let mut line = String::new();
+        BufReader::new(&client).read_line(&mut line).unwrap();
+
+        assert_eq!(line, "{\"event\":\"recording\"}\n");
+    }
+
+    #[test]
+    fn a_connection_closed_without_a_request_gets_no_answer() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let daemon = Daemon::start(Session::new(
+            Box::new(microphone),
+            Box::new(FakeFinalServer::answering(&[])),
+            NO_LIMIT,
+        ));
+        let stream = UnixStream::connect(socket_in(&daemon.runtime_dir)).unwrap();
+
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut answer = String::new();
+        (&stream).read_to_string(&mut answer).unwrap();
+
+        assert_eq!(answer, "");
     }
 
     #[test]
