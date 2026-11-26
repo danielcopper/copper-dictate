@@ -3,15 +3,16 @@
 # .sha256 under <out-dir>, then check the pair: the checksum verifies, and the
 # binary unpacked from the archive reports the version Cargo.toml holds.
 #
-#   scripts/package.sh <out-dir> [<tag>]
+#   scripts/package.sh <out-dir> [<tag> [<binary>]]
 #
 # <tag> defaults to v<version>. A tag given must be exactly that: the release
 # names its assets after the tag release-please made, and a tag that disagrees
 # with Cargo.toml means the archive would carry a binary of another version.
+# <binary> defaults to the host build, target/release/copper-dictate.
 set -euo pipefail
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
-    echo "usage: $0 <out-dir> [<tag>]" >&2
+if [ $# -lt 1 ] || [ $# -gt 3 ]; then
+    echo "usage: $0 <out-dir> [<tag> [<binary>]]" >&2
     exit 2
 fi
 out=$1
@@ -23,7 +24,7 @@ if [ "$tag" != "v$version" ]; then
     exit 1
 fi
 
-binary=target/release/copper-dictate
+binary=${3:-target/release/copper-dictate}
 if [ ! -x "$binary" ]; then
     echo "package: $binary is missing; build it with cargo build --release --locked first" >&2
     exit 1
