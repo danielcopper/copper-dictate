@@ -16,9 +16,9 @@
 
 Self-hosted live dictation for Linux desktops: live preview while you speak, an accurate final text when you stop.
 
-> **Pre-1.0 (v0.x).** Nothing of the above works yet. Today the repository holds the scaffold: a `copper-dictate` binary
-> that prints its version, and the CI, quality and release pipeline around it. Everything under "Planned" is a plan, not
-> a feature.
+> **Pre-1.0 (v0.x).** Only the final text works yet: a daemon records from the default microphone when you run
+> `copper-dictate toggle`, and the second `toggle` prints the text your transcription server returned. The live preview,
+> the shortcut, insertion at the cursor and the overlay are planned, not features.
 
 ---
 
@@ -26,17 +26,51 @@ Self-hosted live dictation for Linux desktops: live preview while you speak, an 
 > **How this is built.** The code is written by an AI coding agent working under my direction. The architecture, the
 > design decisions and the review are mine, and changes are smoke-tested on real hardware before they ship.
 
+## What works
+
+- **A client daemon in Rust** on your desktop, recording from the default microphone (ALSA, so it needs `libasound` —
+  every Linux desktop has it)
+- **Accurate final text** — when you stop, the whole recording goes once to a self-hosted OpenAI-compatible
+  transcription server (`/v1/audio/transcriptions`) as 16 kHz mono WAV, with automatic language detection
+- **Nothing but the dictation leaves your machine** — no telemetry, no connection but the configured endpoint (proxy
+  variables are ignored), and the recording is dropped once its text is back
+
 ## Planned
 
-- **A client daemon in Rust** on your desktop
 - **Live preview** — the text appears while you speak, from a self-hosted realtime WebSocket server
-- **Accurate final text** — when you stop, from a self-hosted OpenAI-compatible transcription server
-- **Desktop integration behind interfaces** — KDE Plasma first
+- **A global shortcut, insertion at the cursor and an overlay** — KDE Plasma first, behind interfaces
+
+## Usage
+
+Write the configuration to `$XDG_CONFIG_HOME/copper-dictate/config.toml` (`~/.config/copper-dictate/config.toml` when
+the variable is unset):
+
+```toml
+[final]
+endpoint = "http://whisper.lan:8000/v1/audio/transcriptions"
+model = "primeline/whisper-large-v3-turbo-german"
+# api_key_file = "/home/me/.config/copper-dictate/final.key"
+
+[recording]
+max_seconds = 900 # a recording stops by itself after this long; 15 minutes when left out
+```
+
+The API key never goes into this file. It is read from the file `api_key_file` names, or, without that line, from the
+environment variable `COPPER_DICTATE_FINAL_API_KEY`; with neither, the request carries no key.
+
+```sh
+copper-dictate daemon   # keep it running; it stops at once, naming the path and the field, if the configuration is incomplete
+copper-dictate toggle   # start a recording
+copper-dictate toggle   # stop it; prints the final text
+```
+
+`toggle` talks to the daemon over `$XDG_RUNTIME_DIR/copper-dictate/daemon.sock`. A recording that reaches `max_seconds`
+stops and is transcribed by itself; the next `toggle` prints its text instead of starting a new recording.
 
 ## Development
 
 The toolchain comes from [mise](https://mise.jdx.dev/): `rust-toolchain.toml` pins Rust, `mise.toml` the cargo tools and
-deno.
+deno. Building also needs the ALSA development files and `pkg-config` (Debian and Ubuntu: `libasound2-dev pkg-config`).
 
 ```sh
 mise run setup   # install the toolchain, the cargo tools and deno, enable the repository's git hooks
