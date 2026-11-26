@@ -397,3 +397,17 @@ pub(crate) fn source_files() -> BTreeMap<String, String> {
     collect(&src, &src, &mut files);
     files
 }
+
+/// Each of [`source_files`] without its `tests` module.
+pub(crate) fn production_code() -> BTreeMap<String, String> {
+    source_files()
+        .into_iter()
+        .map(|(name, content)| {
+            let production = content
+                .split_once("#[cfg(test)]\nmod tests {")
+                .map_or(content.as_str(), |(production, _)| production)
+                .to_owned();
+            (name, production)
+        })
+        .collect()
+}

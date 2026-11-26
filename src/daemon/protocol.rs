@@ -70,6 +70,7 @@ mod tests {
     use std::path::Path;
 
     use super::{ReadError, Reply, Request, read_message, socket_path, write_message};
+    use crate::test_support::production_code;
 
     #[test]
     fn the_socket_lies_in_the_runtime_directory() {
@@ -123,6 +124,44 @@ mod tests {
             read_message::<Request>(&mut &b"{\"command\":\"dance\"}\n"[..]),
             Err(ReadError::Json(_))
         ));
+    }
+
+    #[test]
+    fn no_other_module_names_the_socket() {
+        let naming: Vec<String> = production_code()
+            .into_iter()
+            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("daemon.sock"))
+            .map(|(name, _)| name)
+            .collect();
+
+        assert!(naming.is_empty(), "{naming:?}");
+    }
+
+    #[test]
+    fn the_socket_clients_frame_messages_only_through_this_module() {
+        let framing = [
+            "read_line",
+            "read_until",
+            "write_all",
+            "serde_json::to_",
+            "serde_json::from_",
+        ];
+        let clients: Vec<(String, String)> = production_code()
+            .into_iter()
+            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("UnixStream"))
+            .collect();
+        let framing_elsewhere: Vec<(&str, &str)> = clients
+            .iter()
+            .flat_map(|(name, code)| {
+                framing
+                    .iter()
+                    .filter(|call| code.contains(**call))
+                    .map(move |call| (name.as_str(), *call))
+            })
+            .collect();
+
+        assert!(!clients.is_empty(), "no module uses a UnixStream");
+        assert!(framing_elsewhere.is_empty(), "{framing_elsewhere:?}");
     }
 
     #[test]

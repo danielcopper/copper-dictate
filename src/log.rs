@@ -14,7 +14,7 @@ pub(crate) fn write(out: &mut dyn Write, message: impl Display) -> io::Result<()
 #[cfg(test)]
 mod tests {
     use super::{PREFIX, write};
-    use crate::test_support::source_files;
+    use crate::test_support::production_code;
 
     #[test]
     fn a_line_gets_the_prefix() {
@@ -27,15 +27,10 @@ mod tests {
 
     #[test]
     fn no_production_code_spells_out_the_prefix() {
-        let spelled_out: Vec<String> = source_files()
+        let spelled_out: Vec<String> = production_code()
             .into_iter()
-            .filter(|(name, _)| name != "log.rs" && name != "test_support.rs")
-            .filter(|(_, content)| {
-                let production = content
-                    .split("#[cfg(test)]\nmod tests {")
-                    .next()
-                    .unwrap_or_default();
-                production.contains(PREFIX)
+            .filter(|(name, code)| {
+                name != "log.rs" && name != "test_support.rs" && code.contains(PREFIX)
             })
             .map(|(name, _)| name)
             .collect();
