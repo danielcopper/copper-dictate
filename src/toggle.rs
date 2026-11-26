@@ -12,6 +12,8 @@ enum ToggleError {
         "the daemon is not running (no daemon listens at {0}); start it with `copper-dictate daemon`"
     )]
     NotRunning(PathBuf),
+    #[error("the daemon closed the connection without an answer; is it still running?")]
+    NoAnswer,
     #[error("talking to the daemon failed: {0}")]
     Io(#[from] io::Error),
     #[error("the daemon's answer is not understood: {0}")]
@@ -20,7 +22,13 @@ enum ToggleError {
 
 pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bool {
     match send(socket) {
-        Ok(Reply::Text { text }) => writeln!(out, "{text}").is_ok(),
+        Ok(Reply::Text { text }) => match writeln!(out, "{text}") {
+            Ok(()) => true,
+            Err(error) => {
+                let _ = writeln!(err, "copper-dictate: cannot print the final text: {error}");
+                false
+            }
+        },
         Ok(Reply::Recording) => {
             let _ = writeln!(err, "copper-dictate: recording; toggle again to stop");
             true
@@ -47,16 +55,74 @@ fn send(socket: &Path) -> Result<Reply, ToggleError> {
     request.push('\n');
     stream.write_all(request.as_bytes())?;
     let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line)?;
+    if BufReader::new(&stream).read_line(&mut line)? == 0 {
+        return Err(ToggleError::NoAnswer);
+    }
     Ok(serde_json::from_str(&line)?)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
+    use std::path::PathBuf;
+    use std::thread;
 
     use super::run;
     use crate::test_support::TempDir;
+
+    fn daemon_answering(answer: &'static [u8]) -> (TempDir, PathBuf) {
+        let runtime_dir = TempDir::new();
+        let socket = runtime_dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            BufReader::new(&stream)
+                .read_line(&mut String::new())
+                .unwrap();
+            stream.write_all(answer).unwrap();
+        });
+        (runtime_dir, socket)
+    }
+
+    struct BrokenOutput;
+
+    impl Write for BrokenOutput {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_daemon_that_closes_without_an_answer_is_named() {
+        let (_runtime_dir, socket) = daemon_answering(b"");
+        let mut err = Vec::new();
+
+        assert!(!run(&socket, &mut Vec::new(), &mut err));
+
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "copper-dictate: the daemon closed the connection without an answer; is it still running?\n"
+        );
+    }
+
+    #[test]
+    fn a_final_text_that_cannot_be_printed_is_reported() {
+        let (_runtime_dir, socket) = daemon_answering(b"{\"event\":\"text\",\"text\":\"hi\"}\n");
+        let mut err = Vec::new();
+
+        assert!(!run(&socket, &mut BrokenOutput, &mut err));
+
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with("copper-dictate: cannot print the final text: "),
+            "{err}"
+        );
+    }
 
     #[test]
     fn without_a_daemon_it_fails_and_says_the_daemon_is_not_running() {
