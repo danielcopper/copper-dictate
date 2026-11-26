@@ -151,9 +151,10 @@ mod tests {
     use super::{BindError, bind, serve, serve_connections, socket_path};
     use crate::config::{ApiKey, FinalServerConfig};
     use crate::final_server::HttpFinalServer;
-    use crate::session::Session;
+    use crate::session::{Outcome, Session};
     use crate::test_support::{
-        FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode, wait_until,
+        BrokenMicrophone, FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode,
+        wait_until,
     };
     use crate::toggle;
 
@@ -195,6 +196,13 @@ mod tests {
             model: "whisper-large-v3".to_owned(),
             api_key: ApiKey::parse(b"sk-test").ok(),
         })
+    }
+
+    fn toggle_and_go_away(session: &Arc<Session>) {
+        let (client, accepted) = UnixStream::pair().unwrap();
+        (&client).write_all(b"{\"command\":\"toggle\"}\n").unwrap();
+        drop(client);
+        let _ = super::handle(&accepted, session);
     }
 
     fn tone(seconds: usize) -> Vec<i16> {
@@ -353,6 +361,47 @@ mod tests {
             (true, "kept for later\n".to_owned(), String::new())
         );
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
+    }
+
+    #[test]
+    fn a_failure_whose_toggle_went_away_is_printed_by_the_next_toggle() {
+        let (microphone, events) = FakeMicrophone::new(vec![1]);
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(FakeFinalServer::answering(&[Err("timed out")])),
+            NO_LIMIT,
+        );
+        let daemon = Daemon::start(Arc::clone(&session));
+        daemon.toggle();
+
+        toggle_and_go_away(&session);
+
+        assert_eq!(
+            daemon.toggle(),
+            (
+                false,
+                String::new(),
+                "copper-dictate: the final server failed: timed out\n".to_owned()
+            )
+        );
+        assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
+    }
+
+    #[test]
+    fn a_refusal_whose_toggle_went_away_is_never_kept() {
+        let session = Session::new(
+            Box::new(BrokenMicrophone),
+            Box::new(FakeFinalServer::answering(&[])),
+            NO_LIMIT,
+        );
+
+        toggle_and_go_away(&session);
+
+        assert_eq!(
+            session.toggle(),
+            Outcome::Refused("cannot start the recording: no input device".to_owned()),
+            "the next toggle tries to start a recording again"
+        );
     }
 
     #[test]
