@@ -34,25 +34,37 @@ fi
 # committed is exactly what was staged — possibly unformatted, which CI will say
 # out loud.
 format_staged() {
-    local formatter="$1" dirty file formatted
+    local formatter="$1" file listed staged formatted
+    local -a dirty
     shift
-    dirty=$(git diff --name-only -- "$@")
+    mapfile -d '' -t dirty < <(git --literal-pathspecs diff -z --name-only -- "$@")
+    staged=$(mktemp)
     formatted=$(mktemp)
     for file in "$@"; do
-        if ! git show ":$file" | "$formatter" > "$formatted"; then
-            rm -f "$formatted"
-            echo "pre-commit: $file does not format — fix what the formatter reported above" >&2
+        if ! git show ":$file" > "$staged"; then
+            echo "pre-commit: cannot read the staged $file" >&2
+            rm -f "$staged" "$formatted"
             return 1
         fi
-        git show ":$file" | cmp -s - "$formatted" && continue
-        if [[ $'\n'"$dirty"$'\n' == *$'\n'"$file"$'\n'* ]]; then
-            echo "pre-commit: $file has unstaged changes — leaving it exactly as you staged it, unformatted"
-            continue
+        if ! "$formatter" < "$staged" > "$formatted"; then
+            echo "pre-commit: $file does not format — fix what the formatter reported above" >&2
+            rm -f "$staged" "$formatted"
+            return 1
         fi
-        cat "$formatted" > "$file"
-        git add -- "$file"
+        cmp -s "$staged" "$formatted" && continue
+        for listed in "${dirty[@]}"; do
+            if [ "$listed" = "$file" ]; then
+                echo "pre-commit: $file has unstaged changes — leaving it exactly as you staged it, unformatted"
+                continue 2
+            fi
+        done
+        if ! cat "$formatted" > "$file" || ! git --literal-pathspecs add -- "$file"; then
+            echo "pre-commit: cannot write back and stage the formatted $file" >&2
+            rm -f "$staged" "$formatted"
+            return 1
+        fi
     done
-    rm -f "$formatted"
+    rm -f "$staged" "$formatted"
 }
 
 # --- Rust: rustfmt --------------------------------------------------------
@@ -65,7 +77,7 @@ fi
 if [ -z "$RUSTFMT" ]; then
     echo "pre-commit: rustfmt not found (run 'mise run setup'), skipping Rust format"
 else
-    mapfile -t STAGED_RS < <(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+    mapfile -d '' -t STAGED_RS < <(git diff --cached -z --name-only --diff-filter=ACMR -- '*.rs')
     if [ "${#STAGED_RS[@]}" -gt 0 ]; then
         EDITION=$(sed -n 's/^edition = "\(.*\)"$/\1/p' "$(git rev-parse --show-toplevel)/Cargo.toml")
         if [ -z "$EDITION" ]; then
@@ -87,8 +99,8 @@ if [ -z "$DENO" ]; then
 else
     # Minus the paths deno.json excludes: formatting from stdin skips its
     # include and exclude lists.
-    mapfile -t STAGED_MD < <(git diff --cached --name-only --diff-filter=ACM -- '*.md' \
-        | grep -vE '^(CHANGELOG\.md$|target/|build/|\.claude/worktrees/|\.worktrees/)')
+    mapfile -d '' -t STAGED_MD < <(git diff --cached -z --name-only --diff-filter=ACMR -- '*.md' \
+        | grep -z -vE '^(CHANGELOG\.md$|target/|build/|\.claude/worktrees/|\.worktrees/)')
     if [ "${#STAGED_MD[@]}" -gt 0 ]; then
         format_markdown() { "$DENO" fmt --ext md -; }
         format_staged format_markdown "${STAGED_MD[@]}" || exit 1
