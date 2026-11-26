@@ -12,7 +12,6 @@ pub(crate) enum Request {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum Reply {
     Recording,
-    /// `glitches`: how often the microphone recovered from an error during the recording.
     Text {
         text: String,
         #[serde(default)]
