@@ -388,6 +388,23 @@ mod tests {
     }
 
     #[test]
+    fn a_key_variable_of_only_whitespace_is_refused_as_empty() {
+        let dir = TempDir::new();
+        let config_path = write_config(&dir, MINIMAL);
+
+        let error = load(
+            &config_path,
+            &env(&[("COPPER_DICTATE_FINAL_API_KEY", " \n")]),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ConfigError::KeyVariable(KeyError::Empty)),
+            "{error:?}"
+        );
+    }
+
+    #[test]
     fn a_key_variable_that_is_not_utf8_stops_the_start_and_names_the_variable() {
         let dir = TempDir::new();
         let config_path = write_config(&dir, MINIMAL);
