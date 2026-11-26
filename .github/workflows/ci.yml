@@ -165,8 +165,7 @@ jobs:
   # Runs on every push to main and every pull request whose head is a branch of
   # this repository, Renovate's included. A fork's run gets no secrets, so a
   # fork's PR is skipped here and scanned by sonarcloud-fork-pr.yml once CI has
-  # succeeded, using the reports from `test` and the PR number in
-  # `pr-metadata`.
+  # succeeded, with the PR number in `pr-metadata`.
   #
   # A failed quality gate blocks the merge through `SonarCloud Code Analysis`,
   # the SonarCloud app's own check. The app posts it only once an analysis has
@@ -186,7 +185,7 @@ jobs:
           # Sonar needs full history to attribute new code to the right commits.
           fetch-depth: 0
 
-      # The Rust analyzer calls cargo; this gives it the pinned toolchain.
+      # The Rust analyzer may call cargo; this gives it the pinned toolchain.
       - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
         with:
           cache: false

@@ -15,12 +15,10 @@ name: SonarCloud fork PRs
 #
 # What the scan can still execute: the Rust analyzer may call cargo on the
 # fork's Cargo.toml and Cargo.lock, and Sonar does not document which cargo
-# commands it runs. That cargo is main's pinned toolchain (RUSTUP_TOOLCHAIN,
-# which rustup prefers over any toolchain file), offline, with every
-# rust-toolchain file and .cargo directory of the fork deleted, so neither a
-# toolchain the fork names nor a cargo configuration such as
-# `build.rustc-wrapper` runs. Should the analyzer ever build the crate, the
-# fork's build scripts and proc macros would run beside SONAR_TOKEN.
+# commands it runs. The step "Replace the fork's scanner inputs" says what keeps
+# the fork's toolchain and cargo configuration out of that call. Should the
+# analyzer ever build the crate, the fork's build scripts and proc macros would
+# run beside SONAR_TOKEN.
 
 on:
   workflow_run:
@@ -155,7 +153,9 @@ jobs:
       #   toolchain file can name any directory as the toolchain (`path`), and a
       #   cargo configuration can put any program in front of rustc. Main's
       #   rust-toolchain.toml takes their place, and its channel is installed
-      #   from outside the tree for the scan to run cargo with.
+      #   from outside the tree; the scan runs cargo with it through
+      #   RUSTUP_TOOLCHAIN, which rustup prefers over any toolchain file, and
+      #   offline.
       - name: Replace the fork's scanner inputs
         id: inputs
         if: steps.pr.outputs.scan == 'true'
@@ -172,7 +172,16 @@ jobs:
 
           channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
           [[ "$channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::No pinned channel in main's rust-toolchain.toml"; exit 1; }
-          (cd "$RUNNER_TEMP" && rustup toolchain install "$channel" --profile minimal --no-self-update)
+          # Without clippy, which is the one way Sonar has documented for the
+          # analyzer to build code: a clippy run it starts under
+          # RUSTUP_TOOLCHAIN finds none. --profile minimal leaves it out of a
+          # fresh install; the removal covers a runner image that had it.
+          cd "$RUNNER_TEMP"
+          rustup toolchain install "$channel" --profile minimal --no-self-update
+          if rustup component list --toolchain "$channel" --installed | grep -q '^clippy'; then
+            rustup component remove --toolchain "$channel" clippy
+          fi
+          cd "$GITHUB_WORKSPACE"
           echo "rust-toolchain=$channel" >> "$GITHUB_OUTPUT"
 
           for report in "$ARTIFACTS/coverage-report/lcov.info" "$ARTIFACTS/clippy-report/clippy-report.json"; do
