@@ -11,9 +11,11 @@ use crate::xdg::{self, Env};
 #[error("XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place")]
 pub(crate) struct NoRuntimeDir;
 
+const SOCKET_FILE: &str = "daemon.sock";
+
 pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
     xdg::runtime_dir(env)
-        .map(|dir| dir.join("copper-dictate").join("daemon.sock"))
+        .map(|dir| dir.join("copper-dictate").join(SOCKET_FILE))
         .ok_or(NoRuntimeDir)
 }
 
@@ -69,7 +71,7 @@ mod tests {
     use std::ffi::OsString;
     use std::path::Path;
 
-    use super::{ReadError, Reply, Request, read_message, socket_path, write_message};
+    use super::{ReadError, Reply, Request, SOCKET_FILE, read_message, socket_path, write_message};
     use crate::test_support::production_code;
 
     #[test]
@@ -130,7 +132,7 @@ mod tests {
     fn no_other_module_names_the_socket() {
         let naming: Vec<String> = production_code()
             .into_iter()
-            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("daemon.sock"))
+            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains(SOCKET_FILE))
             .map(|(name, _)| name)
             .collect();
 
