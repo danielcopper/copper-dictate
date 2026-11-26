@@ -139,8 +139,35 @@ mod tests {
         assert!(naming.is_empty(), "{naming:?}");
     }
 
+    fn socket_clients() -> Vec<(String, String)> {
+        let clients: Vec<(String, String)> = production_code()
+            .into_iter()
+            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("UnixStream"))
+            .collect();
+        assert!(!clients.is_empty(), "no module uses a UnixStream");
+        clients
+    }
+
     #[test]
-    fn the_socket_clients_frame_messages_only_through_this_module() {
+    fn every_socket_client_calls_read_message_and_write_message() {
+        let calls = |code: &str, function: &str| {
+            code.contains(&format!("{function}(")) || code.contains(&format!("{function}::<"))
+        };
+        let missing: Vec<(String, &str)> = socket_clients()
+            .into_iter()
+            .flat_map(|(name, code)| {
+                ["read_message", "write_message"]
+                    .into_iter()
+                    .filter(move |function| !calls(&code, function))
+                    .map(move |function| (name.clone(), function))
+            })
+            .collect();
+
+        assert!(missing.is_empty(), "{missing:?}");
+    }
+
+    #[test]
+    fn the_socket_clients_make_none_of_the_framing_calls() {
         let framing = [
             "read_line",
             "read_until",
@@ -148,10 +175,7 @@ mod tests {
             "serde_json::to_",
             "serde_json::from_",
         ];
-        let clients: Vec<(String, String)> = production_code()
-            .into_iter()
-            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("UnixStream"))
-            .collect();
+        let clients = socket_clients();
         let framing_elsewhere: Vec<(&str, &str)> = clients
             .iter()
             .flat_map(|(name, code)| {
@@ -162,7 +186,6 @@ mod tests {
             })
             .collect();
 
-        assert!(!clients.is_empty(), "no module uses a UnixStream");
         assert!(framing_elsewhere.is_empty(), "{framing_elsewhere:?}");
     }
 
