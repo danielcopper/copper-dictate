@@ -72,8 +72,9 @@ copper-dictate toggle   # stop it; prints the final text
 stops and is transcribed by itself; the next `toggle` prints its text instead of starting a new recording. The same
 holds for the text, or the error, of a `toggle` that was interrupted before it arrived. A microphone glitch the audio
 stack recovers from (an overrun, a device change) does not end the recording; the `toggle` that prints its text also
-warns on stderr how often the microphone glitched. Any other microphone error fails the dictation. The final server gets
-twice the recording's length to answer, at least ten minutes; a server that takes longer fails the dictation.
+warns on stderr how often the microphone glitched. A refused real-time priority loses no audio and is only logged. Any
+other microphone error fails the dictation. The final server gets twice the recording's length to answer, at least ten
+minutes; a server that takes longer fails the dictation.
 
 ## Development
 
