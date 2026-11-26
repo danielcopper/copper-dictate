@@ -1,0 +1,6 @@
+# gitleaks reads this file from the root of the path it scans unless a
+# config is passed by flag or environment.
+title = "copper-dictate"
+
+[extend]
+useDefault = true

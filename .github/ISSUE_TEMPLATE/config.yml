@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Discussions
+    url: https://github.com/danielcopper/copper-dictate/discussions
+    about: Questions, ideas, and general conversation that aren't bug reports or specific feature requests

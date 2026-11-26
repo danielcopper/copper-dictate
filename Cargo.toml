@@ -1,0 +1,30 @@
+[package]
+name = "copper-dictate"
+version = "0.0.0"
+edition = "2024"
+description = "Self-hosted live dictation for Linux desktops"
+license = "MIT"
+repository = "https://github.com/danielcopper/copper-dictate"
+readme = "README.md"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unreachable_pub = "deny"
+unused_qualifications = "deny"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+dbg_macro = "deny"
+expect_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"
+
+[profile.release]
+strip = true

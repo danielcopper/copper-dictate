@@ -1,0 +1,15 @@
+Third-party notices for copper-dictate
+
+copper-dictate is built from the crates below. Each section names a
+licence, the crates distributed under it, and the licence's text.
+{{#each licenses}}
+
+================================================================================
+{{name}}
+
+{{#each used_by}}
+  {{crate.name}} {{crate.version}}{{#if crate.repository}}  {{crate.repository}}{{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

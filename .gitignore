@@ -1,0 +1,33 @@
+# Build output
+/target
+
+# Release tarballs — `mise run build:release`
+/build
+
+# Sonar's inputs: lcov.info from `mise run coverage` (and CI's test job),
+# clippy-report.json from clippy's JSON output in CI's test job
+lcov.info
+clippy-report.json
+
+# Environment
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Claude Code — everything is local (worktrees, agents, settings.local.json)
+# except .claude/rules/, the place for checked-in path-scoped coding rules.
+# Ignoring the contents rather than the directory itself is what makes the
+# negation below reachable: git does not descend into an ignored directory.
+.claude/*
+!.claude/rules/
+
+# Git worktrees
+.worktrees/

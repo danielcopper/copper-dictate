@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+# The Rust toolchain comes from setup-rust-toolchain, which reads
+# rust-toolchain.toml; mise-action installs the other tools mise.toml pins, so
+# mise must not take rust over as well.
+env:
+  MISE_DISABLE_TOOLS: rust
+
+jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      # The action's cache is Swatinem/rust-cache, keyed per job.
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+
+  # Also writes the two reports Sonar reads, so the suite runs once per push:
+  # the `sonarcloud` job below and, for a fork's PR, sonarcloud-fork-pr.yml
+  # take them from this job's artifacts.
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+
+      - &mise
+        uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        with:
+          version: 2026.11.14
+
+      - name: Run the tests with coverage
+        run: cargo llvm-cov nextest --locked --lcov --output-path lcov.info
+
+      # Every lint capped at a warning, and warnings allowed to finish the run,
+      # so a finding lands in the report instead of ending it; the `clippy` job
+      # is the one that fails on it.
+      - name: Write the clippy report
+        env:
+          CARGO_BUILD_WARNINGS: warn
+        run: cargo clippy --all-targets --all-features --locked --message-format=json -- --cap-lints warn > clippy-report.json
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: lcov.info
+
+      - name: Upload clippy artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: clippy-report
+          path: clippy-report.json
+
+  deny:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false
+
+      - *mise
+
+      - name: Check advisories, licences, bans and sources
+        run: cargo deny --locked check
+
+  doc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+
+      - name: Build the documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --locked
+
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+
+      - *mise
+
+      - name: Build the release binary
+        run: cargo build --release --locked --target x86_64-unknown-linux-gnu
+
+      - name: Pack it with its notices and check the archive, its checksum and the binary's --version
+        run: bash scripts/package.sh build
+
+  markdown-format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+
+      - *mise
+
+      - name: Check Markdown formatting
+        run: deno fmt --check
+
+  # A fork's PR only: sonarcloud-fork-pr.yml reads the PR number from this
+  # artifact and checks it against the API.
+  pr-metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    steps:
+      - name: Record the PR number
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          mkdir pr-metadata
+          echo "$PR_NUMBER" > pr-metadata/pr-number
+
+      - name: Upload PR metadata artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-metadata
+          path: pr-metadata/
+
+  # Runs on every push to main and every pull request whose head is a branch of
+  # this repository, Renovate's included. A fork's run gets no secrets, so a
+  # fork's PR is skipped here and scanned by sonarcloud-fork-pr.yml once CI has
+  # succeeded, with the PR number in `pr-metadata`.
+  #
+  # A failed quality gate blocks the merge through `SonarCloud Code Analysis`,
+  # the SonarCloud app's own check. The app posts it only once an analysis has
+  # run — this job's on a branch's PR, sonarcloud-fork-pr.yml's on a fork's —
+  # so a scan that never analysed leaves the check unreported, which blocks as
+  # well.
+  sonarcloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [test]
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Sonar needs full history to attribute new code to the right commits.
+          fetch-depth: 0
+
+      # The Rust analyzer may call cargo; this gives it the pinned toolchain.
+      - uses: actions-rust-lang/setup-rust-toolchain@a188e68d0fd2bd36ad51dccb2b07ba6e75105f30 # v2.0.1
+        with:
+          cache: false
+
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+
+      - name: Download clippy artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: clippy-report
+
+      - name: SonarQube Cloud scan
+        uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

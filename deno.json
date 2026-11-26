@@ -1,0 +1,14 @@
+{
+  "fmt": {
+    "include": ["**/*.md"],
+    "exclude": [
+      "CHANGELOG.md",
+      "target/",
+      "build/",
+      ".claude/worktrees/",
+      ".worktrees/"
+    ],
+    "proseWrap": "always",
+    "lineWidth": 120
+  }
+}

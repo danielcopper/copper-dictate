@@ -1,0 +1,60 @@
+[settings]
+idiomatic_version_file_enable_tools = ["rust"]
+
+[tools]
+deno = "2.8" # minor pin — deno fmt is a formatter; a version jump can reformat Markdown
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.152"
+"aqua:taiki-e/cargo-llvm-cov" = "0.9.2"
+"aqua:EmbarkStudios/cargo-deny" = "0.22.1"
+"github:EmbarkStudios/cargo-about" = "0.9.3" # not in the aqua registry
+
+[tasks.setup]
+description = "Install the Rust toolchain, the cargo tools and deno, and point git at the repository's hooks"
+run = ["mise install", "git config core.hooksPath .githooks"]
+
+[tasks."fmt:check"]
+description = "Check the Rust formatting"
+run = "cargo fmt --check"
+
+[tasks.lint]
+description = "Run clippy over every target, warnings as errors"
+run = "cargo clippy --all-targets --all-features --locked -- -D warnings"
+
+[tasks.test]
+description = "Run the tests"
+run = "cargo nextest run --locked"
+
+[tasks.deny]
+description = "Check the dependencies' advisories, licences, bans and sources"
+run = "cargo deny --locked check"
+
+[tasks.doc]
+description = "Build the documentation, warnings as errors"
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --no-deps --locked"
+
+[tasks.coverage]
+description = "Write the test coverage as LCOV to lcov.info, the file Sonar reads"
+run = "cargo llvm-cov nextest --locked --lcov --output-path lcov.info"
+
+[tasks.markdown-format]
+description = "Check the Markdown formatting"
+run = "deno fmt --check"
+
+[tasks."build:release"]
+description = "Build the release binary and pack it with its notices as the release does, under build/"
+# build/ is emptied first: after a version change it would hold two archives.
+run = [
+    "cargo build --release --locked --target x86_64-unknown-linux-gnu",
+    "rm -rf build && bash scripts/package.sh build",
+]
+
+[tasks.gate]
+description = "Run every check in ci.yml but the Sonar scan, in one command"
+# One task per checking job in ci.yml, named after the job except fmt:check
+# (fmt), lint (clippy), coverage (test; that job's clippy report checks
+# nothing) and build:release (build).
+# mise starts them side by side (`--jobs 1` runs them one at a time); clippy and
+# doc queue on cargo's lock of target/debug, while coverage and the release
+# build each build in a directory of their own.
+depends = ["fmt:check", "lint", "coverage", "deny", "doc", "build:release", "markdown-format"]
