@@ -14,11 +14,11 @@ name: SonarCloud fork PRs
 # the two reports reach the scanner as the data it analyses.
 #
 # What the scan can still execute: the Rust analyzer may call cargo on the
-# fork's Cargo.toml and Cargo.lock, and Sonar does not document which cargo
-# commands it runs. The step "Replace the fork's scanner inputs" says what keeps
-# the fork's toolchain and cargo configuration out of that call. Should the
-# analyzer ever build the crate, the fork's build scripts and proc macros would
-# run beside SONAR_TOKEN.
+# fork's Cargo.toml and Cargo.lock, and Sonar documents no cargo command it runs
+# but clippy, which is switched off (sonar-project.properties). The step
+# "Replace the fork's scanner inputs" says what keeps the fork's toolchain and
+# cargo configuration out of that call. Should the analyzer ever build the
+# crate, the fork's build scripts and proc macros would run beside SONAR_TOKEN.
 
 on:
   workflow_run:
@@ -175,11 +175,17 @@ jobs:
           # Without clippy, which is the one way Sonar has documented for the
           # analyzer to build code: a clippy run it starts under
           # RUSTUP_TOOLCHAIN finds none. --profile minimal leaves it out of a
-          # fresh install; the removal covers a runner image that had it.
+          # fresh install; the removal covers a runner image that had it, and
+          # the last check holds the outcome rather than the list.
           cd "$RUNNER_TEMP"
           rustup toolchain install "$channel" --profile minimal --no-self-update
-          if rustup component list --toolchain "$channel" --installed | grep -q '^clippy'; then
+          installed=$(rustup component list --toolchain "$channel" --installed)
+          if [[ $'\n'"$installed" == *$'\n'clippy* ]]; then
             rustup component remove --toolchain "$channel" clippy
+          fi
+          if rustup which --toolchain "$channel" cargo-clippy > /dev/null 2>&1; then
+            echo "::error::clippy is still installed for $channel"
+            exit 1
           fi
           cd "$GITHUB_WORKSPACE"
           echo "rust-toolchain=$channel" >> "$GITHUB_OUTPUT"
