@@ -1,0 +1,70 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "security:minimumReleaseAgeCrate"
+  ],
+  "enabledManagers": [
+    "cargo",
+    "github-actions",
+    "mise",
+    "rust-toolchain"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "labels": [
+    "area:ci"
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "automerge": true,
+    "schedule": [
+      "before 6am on the first day of the month"
+    ]
+  },
+  "packageRules": [
+    {
+      "description": "Cargo + GitHub Actions: auto-merge minor/patch/digest; majors are left for human review.",
+      "matchManagers": [
+        "cargo",
+        "github-actions"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "pin",
+        "digest"
+      ],
+      "automerge": true
+    },
+    {
+      "description": "The shared reusable workflow from danielcopper/.github is pinned to a commit of its main branch (`# main`). Renovate proposes the new commit, but every bump gets human review: the shared check can block every pull request here. Overrides the digest auto-merge in the rule above.",
+      "matchManagers": [
+        "github-actions"
+      ],
+      "matchDepTypes": [
+        "workflow"
+      ],
+      "matchDepNames": [
+        "danielcopper/.github"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "The Rust toolchain in rust-toolchain.toml: every bump gets human review, since a new compiler can bring new lints and clippy denies every warning.",
+      "matchManagers": [
+        "rust-toolchain"
+      ],
+      "automerge": false
+    },
+    {
+      "description": "Never auto-merge a major update, in any ecosystem. Overrides the manager auto-merge rules above for major updates; minor/patch/digest (except the shared reusable workflow from danielcopper/.github) and lock-file maintenance still auto-merge.",
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "automerge": false
+    }
+  ],
+  "platformAutomerge": true
+}
