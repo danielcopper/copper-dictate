@@ -1,21 +1,23 @@
 name: Release
 
-# Two jobs: release-please decides the version, the tag and the changelog, and
-# `assets` attaches what a tag is worth downloading —
-# `copper-dictate-<tag>-x86_64-linux.tar.gz` and its `.sha256`.
+# The `release-please` job decides the version, the tag and the changelog; the
+# `assets` job attaches what a tag is worth downloading —
+# `copper-dictate-<tag>-x86_64-linux.tar.gz`, which carries the binary, LICENSE,
+# README.md and the third-party notices, and its `.sha256`.
 #
-# The archive is packed from the tag by the same `scripts/package.sh` every
-# PR's build job already runs, so a release is not the first place the
-# packager is exercised.
+# The archive is packed from the tag by the same build and `scripts/package.sh`
+# that every PR's build job runs, so a release is not the first place either is
+# exercised.
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+# The jobs need no more than this from GITHUB_TOKEN: release-please writes with
+# the App's token, and `assets` raises its own to `contents: write`.
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 # Serialize releases: two quick pushes to main must not run release-please
 # concurrently and race on the release PR / tag.
@@ -76,6 +78,14 @@ jobs:
         with:
           cache: false
 
+      # cargo-about for the notices, at the version mise.toml pins.
+      - uses: jdx/mise-action@924e7c586e33d7d4bae9c14e26c5d22e2beb6e78 # v5.3.0
+        env:
+          MISE_DISABLE_TOOLS: rust
+        with:
+          version: 2026.11.14
+          cache: false
+
       - name: Build the release binary
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
 
@@ -84,11 +94,11 @@ jobs:
       - name: Pack the archive and check it
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: bash scripts/package.sh build "$TAG" target/x86_64-unknown-linux-gnu/release/copper-dictate
+        run: bash scripts/package.sh build "$TAG"
 
       # `--clobber` makes a re-run of this job harmless.
       - name: Attach the archive and its checksum to the release
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "build/copper-dictate-$TAG-x86_64-linux.tar.gz" "build/copper-dictate-$TAG-x86_64-linux.tar.gz.sha256" --clobber
+        run: gh release upload "$TAG" build/copper-dictate-*.tar.gz build/copper-dictate-*.tar.gz.sha256 --clobber

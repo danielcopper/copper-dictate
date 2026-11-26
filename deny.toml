@@ -8,7 +8,9 @@ yanked = "deny"
 ignore = []
 
 [licenses]
-# Permissive licences only: each lets the binary ship under MIT with the notices kept.
+# Permissive licences only: each lets the binary ship under MIT with the notices
+# kept, which scripts/package.sh writes into the archive with cargo about. Keep
+# this list equal to `accepted` in about.toml.
 allow = [
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
