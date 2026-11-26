@@ -20,9 +20,10 @@ if [ -n "${global_hooks:-}" ] && [ -x "$global_hooks/pre-commit" ] &&
 fi
 
 # staged_regular_files <pathspec>...: print, NUL-separated, the staged added,
-# copied, modified and renamed paths whose index entry is a regular file. A
-# symlink (120000) or a submodule (160000) is never formatted: its blob is not
-# file content, and writing a result back would go through the link.
+# copied, modified, renamed and type-changed paths whose index entry is a
+# regular file. A symlink (120000) or a submodule (160000) is never formatted:
+# neither has file content to format, and a write to a symlink would go through
+# it.
 staged_regular_files() {
     local meta path
     local -a fields
@@ -31,7 +32,7 @@ staged_regular_files() {
         IFS= read -r -d '' path
         case ${fields[4]} in R* | C*) IFS= read -r -d '' path ;; esac
         case ${fields[1]} in 100644 | 100755) printf '%s\0' "$path" ;; esac
-    done < <(git diff --cached -z --raw --diff-filter=ACMR -- "$@")
+    done < <(git diff --cached -z --raw --diff-filter=ACMRT -- "$@")
 }
 
 # format_staged <formatter> <file>...: run <formatter>, a filter from stdin to
@@ -47,11 +48,11 @@ staged_regular_files() {
 # the author deliberately kept out of the index, and nothing anywhere would say
 # so. Such a file is named instead and left alone, index and worktree: what is
 # committed is exactly what was staged — possibly unformatted, which CI will say
-# out loud. So is a worktree path that is not a regular file reached without a
-# symlink, since writing to it would land somewhere else.
+# out loud. So is a worktree path that is a symlink, sits under one or is not a
+# regular file: a write to it would not reach the file that was staged.
 #
-# The blob is read at stage 0 explicitly: `:<path>` would read `:0:y.rs` as
-# stage 0 of y.rs.
+# The blob is read at stage 0 explicitly: `:<path>` would read a file named
+# `0:y.rs` as stage 0 of y.rs.
 format_staged() {
     local formatter="$1" file listed staged formatted top
     local -a dirty

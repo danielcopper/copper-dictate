@@ -176,7 +176,8 @@ jobs:
           # analyzer to build code: a clippy run it starts under
           # RUSTUP_TOOLCHAIN finds none. --profile minimal leaves it out of a
           # fresh install; the removal covers a runner image that had it, and
-          # the last check holds the outcome rather than the list.
+          # the last check tests the outcome (no cargo-clippy for the
+          # toolchain), not the component list.
           cd "$RUNNER_TEMP"
           rustup toolchain install "$channel" --profile minimal --no-self-update
           installed=$(rustup component list --toolchain "$channel" --installed)
