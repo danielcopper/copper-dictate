@@ -1,6 +1,9 @@
 # Build output
 /target
 
+# Release tarballs — `mise run build:release`
+/build
+
 # Sonar inputs — `mise run coverage` and the CI sonarcloud job write them
 lcov.info
 clippy-report.json
