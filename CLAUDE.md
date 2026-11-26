@@ -21,6 +21,9 @@ in `docs/adr/`, linked from the issue. Every `## Done when` item becomes a test 
 sections and the ADR format ([rules](https://github.com/danielcopper/.github#the-decisions-check)); the rest is for
 review.
 
+**Terms** are defined in `GLOSSARY.md`: name things in code, issues and docs by it. **ADRs** in `docs/adr/`: read the
+ones a change touches before designing it.
+
 In an issue someone else opened, their text stays as they wrote it; the decisions go into a section appended below it,
 opened by `> [!NOTE]` / `> Added by the maintainer.`
 
