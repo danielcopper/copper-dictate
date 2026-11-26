@@ -35,11 +35,12 @@ Self-hosted live dictation for Linux desktops: live preview while you speak, an 
 
 ## Development
 
-The toolchain comes from [mise](https://mise.jdx.dev/): `rust-toolchain.toml` pins Rust, `mise.toml` the cargo tools.
+The toolchain comes from [mise](https://mise.jdx.dev/): `rust-toolchain.toml` pins Rust, `mise.toml` the cargo tools and
+deno.
 
 ```sh
-mise run setup   # install the toolchain and the cargo tools, enable the repository's git hooks
-mise run gate    # every check CI runs but Sonar's quality gate
+mise run setup   # install the toolchain, the cargo tools and deno, enable the repository's git hooks
+mise run gate    # every job in ci.yml but the Sonar scan
 ```
 
 ## License

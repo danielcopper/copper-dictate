@@ -1,5 +1,3 @@
-# Path-to-label mapping for actions/labeler.
-#
 # Every label listed here must exist in the repository (`gh label list`).
 
 area:client:
