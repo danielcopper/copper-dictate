@@ -59,7 +59,7 @@
       "automerge": false
     },
     {
-      "description": "Never auto-merge a major update, in any ecosystem: a guard against a later rule turning auto-merge on for majors.",
+      "description": "Never auto-merge a major update, in any ecosystem. Kept last, so it overrides any rule above it that turns auto-merge on.",
       "matchUpdateTypes": [
         "major"
       ],

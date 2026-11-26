@@ -26,7 +26,7 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
 - **Setup** `mise run setup` (the toolchain from `rust-toolchain.toml`, the cargo tools and deno from `mise.toml`, and
   `core.hooksPath .githooks`) · **Tests** `mise run test` (nextest; unit tests beside the code in `src/`, the binary's
   tests in `tests/`) · **Lint** `mise run lint` (clippy, warnings as errors) · **Coverage** `mise run coverage` →
-  `lcov.info` · **Gate** `mise run gate`.
+  `lcov.info`.
 - **Toolchain** `rust-toolchain.toml` is the one source for the Rust version; CI, mise and rustup all read it. The cargo
   tools and deno are pinned in `mise.toml`, and CI installs them from there.
 - **Lints** are denied in `Cargo.toml` (`[lints]`), not only in CI: clippy `all` and `pedantic`, and no `unwrap` or

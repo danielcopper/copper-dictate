@@ -40,7 +40,7 @@ deno.
 
 ```sh
 mise run setup   # install the toolchain, the cargo tools and deno, enable the repository's git hooks
-mise run gate    # the CI checks, run locally
+mise run gate    # most of CI's checks, run locally (the list: mise.toml)
 ```
 
 ## License

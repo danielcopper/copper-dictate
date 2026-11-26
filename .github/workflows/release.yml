@@ -63,8 +63,7 @@ jobs:
     if: needs.release-please.outputs.release_created == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # `contents: write` is all that attaching an asset needs. The App token
-    # stays with release-please, which is the job that has to author commits.
+    # `contents: write` is all that attaching an asset needs.
     permissions:
       contents: write
     steps:

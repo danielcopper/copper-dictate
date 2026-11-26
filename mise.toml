@@ -51,9 +51,9 @@ run = [
 
 [tasks.gate]
 description = "Run every check in ci.yml but the Sonar scan, in one command"
-# One task per CI job: fmt:check is fmt, lint is clippy, coverage is test (CI's
-# test job also writes the clippy report, which checks nothing), deny is deny,
-# doc is doc, build:release is build, markdown-format is markdown-format.
+# One task per checking job in ci.yml, named after the job except fmt:check
+# (fmt), lint (clippy), coverage (test; that job's clippy report checks
+# nothing) and build:release (build).
 # mise starts them side by side (`--jobs 1` runs them one at a time); clippy and
 # doc queue on cargo's lock of target/debug, while coverage and the release
 # build each build in a directory of their own.
