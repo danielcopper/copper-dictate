@@ -29,9 +29,7 @@ mod tests {
     fn no_production_code_spells_out_the_prefix() {
         let spelled_out: Vec<String> = production_code()
             .into_iter()
-            .filter(|(name, code)| {
-                name != "log.rs" && name != "test_support.rs" && code.contains(PREFIX)
-            })
+            .filter(|(name, code)| name != "log.rs" && code.contains(PREFIX))
             .map(|(name, _)| name)
             .collect();
 

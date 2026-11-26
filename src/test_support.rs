@@ -398,10 +398,11 @@ pub(crate) fn source_files() -> BTreeMap<String, String> {
     files
 }
 
-/// Each of [`source_files`] without its `tests` module.
+/// [`source_files`] without `test_support.rs`, and each without its `tests` module.
 pub(crate) fn production_code() -> BTreeMap<String, String> {
     source_files()
         .into_iter()
+        .filter(|(name, _)| name != "test_support.rs")
         .map(|(name, content)| {
             let production = content
                 .split_once("#[cfg(test)]\nmod tests {")
