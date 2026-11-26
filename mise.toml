@@ -48,6 +48,6 @@ run = ["cargo build --release --locked", "rm -rf build && bash scripts/package.s
 [tasks.gate]
 description = "Run every check CI enforces but Sonar's quality gate, in one command"
 # One task per CI job: fmt, clippy, test, deny, doc, build and markdown-format.
-# The cargo steps share one target directory, and cargo's lock on it runs them
-# one after another even though mise starts them side by side.
+# mise starts them side by side (`--jobs 1` runs them one at a time); the cargo
+# steps still queue on cargo's lock of the shared target directory.
 depends = ["fmt:check", "lint", "test", "deny", "doc", "build:release", "markdown-format"]
