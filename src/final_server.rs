@@ -90,8 +90,6 @@ impl HttpFinalServer {
     }
 }
 
-/// Twice the recording's length, at least ten minutes: a server slower than that is cut
-/// off.
 fn answer_minutes(samples: usize) -> u32 {
     let seconds = u64::try_from(samples)
         .unwrap_or(u64::MAX)
