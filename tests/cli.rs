@@ -19,14 +19,18 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_copper-dictate"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_copper-dictate"));
+        command
             .args(args)
             .env_clear()
             .env("HOME", self.path())
             .env("XDG_CONFIG_HOME", self.path().join("config"))
-            .env("XDG_RUNTIME_DIR", self.path().join("runtime"))
-            .output()
-            .unwrap()
+            .env("XDG_RUNTIME_DIR", self.path().join("runtime"));
+        // cargo-llvm-cov collects the binary's coverage through this variable.
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
+        command.output().unwrap()
     }
 }
 
