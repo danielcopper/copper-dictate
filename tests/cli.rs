@@ -18,7 +18,6 @@ impl Sandbox {
         &self.0
     }
 
-    /// Runs the binary with an environment holding only the sandbox's directories.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_copper-dictate"))
             .args(args)

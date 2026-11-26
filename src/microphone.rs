@@ -8,7 +8,6 @@ use cpal::{Device, FromSample, SampleFormat, SizedSample, Stream, SupportedStrea
 
 use crate::resample::Resampler;
 use crate::session::{AudioSource, BoxError, Capture, Recording};
-use crate::wav::SAMPLE_RATE;
 
 /// The default input device of the default audio host (ALSA on Linux).
 pub(crate) struct Microphone;
@@ -93,7 +92,7 @@ fn open() -> Result<(Stream, Samples), BoxError> {
 fn choose_config(device: &Device) -> Result<SupportedStreamConfig, BoxError> {
     let at_16_khz = device.supported_input_configs().ok().and_then(|configs| {
         configs
-            .filter_map(|range| range.try_with_sample_rate(SAMPLE_RATE))
+            .filter_map(|range| range.try_with_sample_rate(Recording::SAMPLE_RATE))
             .min_by_key(SupportedStreamConfig::channels)
     });
     match at_16_khz {

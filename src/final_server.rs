@@ -117,8 +117,7 @@ mod tests {
     use super::{HttpFinalServer, boundary_absent_from};
     use crate::config::{self, FinalServerConfig};
     use crate::session::{FinalServer, Recording};
-    use crate::test_support::{FakeHttpServer, Part, TempDir};
-    use crate::wav::tests::{Decoded, decode};
+    use crate::test_support::{Decoded, FakeHttpServer, Part, TempDir, decode};
 
     fn server(url: &str, api_key: Option<&str>) -> HttpFinalServer {
         HttpFinalServer::new(FinalServerConfig {

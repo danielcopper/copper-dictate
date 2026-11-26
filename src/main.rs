@@ -9,6 +9,7 @@ mod session;
 mod test_support;
 mod toggle;
 mod wav;
+mod xdg;
 
 use std::ffi::OsString;
 use std::io;
@@ -16,10 +17,10 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
-use crate::config::Env;
 use crate::final_server::HttpFinalServer;
 use crate::microphone::Microphone;
 use crate::session::{BoxError, Session};
+use crate::xdg::Env;
 
 #[derive(Debug, Parser)]
 #[command(version, about)]
@@ -47,7 +48,7 @@ fn main() -> ExitCode {
                 false
             }
         },
-        Command::Toggle => match protocol::socket_path(&env) {
+        Command::Toggle => match daemon::socket_path(&env) {
             Ok(socket) => toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock()),
             Err(error) => {
                 eprintln!("copper-dictate: {error}");
@@ -64,7 +65,7 @@ fn main() -> ExitCode {
 
 fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
-    let socket = protocol::socket_path(env)?;
+    let socket = daemon::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
     let session = Session::new(
         Box::new(Microphone),

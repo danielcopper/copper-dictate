@@ -3,11 +3,13 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::{fs, process};
 
-/// A directory under the system's temporary directory, removed on drop.
+use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording};
+
 pub(crate) struct TempDir(PathBuf);
 
 impl TempDir {
@@ -121,8 +123,6 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// An HTTP server on a local port that answers each request with the next of
-/// the given responses and hands the requests it received to the test.
 pub(crate) struct FakeHttpServer {
     pub(crate) url: String,
     pub(crate) requests: Receiver<Request>,
@@ -186,5 +186,128 @@ fn answer(stream: TcpStream, status: u16, body: &str) -> Request {
         path,
         headers,
         body: request_body,
+    }
+}
+
+pub(crate) struct FakeMicrophone {
+    samples: Vec<i16>,
+    events: Sender<&'static str>,
+}
+
+impl FakeMicrophone {
+    pub(crate) fn new(samples: Vec<i16>) -> (Self, Receiver<&'static str>) {
+        let (events, received) = mpsc::channel();
+        (Self { samples, events }, received)
+    }
+}
+
+impl AudioSource for FakeMicrophone {
+    fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
+        self.events.send("start")?;
+        Ok(Box::new(FakeCapture {
+            samples: self.samples.clone(),
+            events: self.events.clone(),
+        }))
+    }
+}
+
+struct FakeCapture {
+    samples: Vec<i16>,
+    events: Sender<&'static str>,
+}
+
+impl Capture for FakeCapture {
+    fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
+        self.events.send("stop")?;
+        Ok(Recording {
+            samples: self.samples,
+        })
+    }
+}
+
+pub(crate) struct BrokenMicrophone;
+
+impl AudioSource for BrokenMicrophone {
+    fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
+        Err("no input device".into())
+    }
+}
+
+pub(crate) struct FakeFinalServer {
+    answers: Mutex<Vec<Result<String, String>>>,
+    pub(crate) received: Arc<Mutex<Vec<Recording>>>,
+    release: Option<Mutex<Receiver<()>>>,
+}
+
+impl FakeFinalServer {
+    pub(crate) fn answering(answers: &[Result<&str, &str>]) -> Self {
+        Self {
+            answers: Mutex::new(
+                answers
+                    .iter()
+                    .rev()
+                    .map(|answer| answer.map(str::to_owned).map_err(str::to_owned))
+                    .collect(),
+            ),
+            received: Arc::default(),
+            release: None,
+        }
+    }
+
+    pub(crate) fn held(mut self) -> (Self, Sender<()>) {
+        let (release, wait) = mpsc::channel();
+        self.release = Some(Mutex::new(wait));
+        (self, release)
+    }
+}
+
+impl FinalServer for FakeFinalServer {
+    fn transcribe(&self, recording: &Recording) -> Result<String, BoxError> {
+        self.received.lock().unwrap().push(recording.clone());
+        if let Some(release) = &self.release {
+            release.lock().unwrap().recv()?;
+        }
+        let answer = self.answers.lock().unwrap().pop().expect("an answer left");
+        answer.map_err(Into::into)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Decoded {
+    pub(crate) format: u16,
+    pub(crate) channels: u16,
+    pub(crate) sample_rate: u32,
+    pub(crate) bits_per_sample: u16,
+    pub(crate) samples: Vec<i16>,
+}
+
+pub(crate) fn decode(wav: &[u8]) -> Decoded {
+    let u16_at = |at: usize| u16::from_le_bytes([wav[at], wav[at + 1]]);
+    let u32_at = |at: usize| u32::from_le_bytes(wav[at..at + 4].try_into().unwrap());
+    assert_eq!(&wav[0..4], b"RIFF");
+    assert_eq!(u32_at(4) as usize, wav.len() - 8);
+    assert_eq!(&wav[8..16], b"WAVEfmt ");
+    assert_eq!(u32_at(16), 16);
+    assert_eq!(&wav[36..40], b"data");
+    assert_eq!(u32_at(40) as usize, wav.len() - 44);
+    let channels = u16_at(22);
+    let sample_rate = u32_at(24);
+    let bits_per_sample = u16_at(34);
+    assert_eq!(
+        u32_at(28),
+        sample_rate * u32::from(channels * bits_per_sample / 8)
+    );
+    assert_eq!(u16_at(32), channels * bits_per_sample / 8);
+    Decoded {
+        format: u16_at(20),
+        channels,
+        sample_rate,
+        bits_per_sample,
+        samples: wav[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| i16::from_le_bytes(pair))
+            .collect(),
     }
 }

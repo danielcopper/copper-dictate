@@ -1,6 +1,8 @@
 use thiserror::Error;
 
-pub(crate) const SAMPLE_RATE: u32 = 16_000;
+use crate::session::Recording;
+
+const SAMPLE_RATE: u32 = Recording::SAMPLE_RATE;
 const CHANNELS: u16 = 1;
 const BITS_PER_SAMPLE: u16 = 16;
 const BYTES_PER_SAMPLE: u32 = 2;
@@ -46,49 +48,9 @@ fn data_len(samples: usize) -> Option<u32> {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::{data_len, encode};
-
-    /// The format fields and samples of a WAV file `encode` wrote.
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) struct Decoded {
-        pub(crate) format: u16,
-        pub(crate) channels: u16,
-        pub(crate) sample_rate: u32,
-        pub(crate) bits_per_sample: u16,
-        pub(crate) samples: Vec<i16>,
-    }
-
-    pub(crate) fn decode(wav: &[u8]) -> Decoded {
-        let u16_at = |at: usize| u16::from_le_bytes([wav[at], wav[at + 1]]);
-        let u32_at = |at: usize| u32::from_le_bytes(wav[at..at + 4].try_into().unwrap());
-        assert_eq!(&wav[0..4], b"RIFF");
-        assert_eq!(u32_at(4) as usize, wav.len() - 8);
-        assert_eq!(&wav[8..16], b"WAVEfmt ");
-        assert_eq!(u32_at(16), 16);
-        assert_eq!(&wav[36..40], b"data");
-        assert_eq!(u32_at(40) as usize, wav.len() - 44);
-        let channels = u16_at(22);
-        let sample_rate = u32_at(24);
-        let bits_per_sample = u16_at(34);
-        assert_eq!(
-            u32_at(28),
-            sample_rate * u32::from(channels * bits_per_sample / 8)
-        );
-        assert_eq!(u16_at(32), channels * bits_per_sample / 8);
-        Decoded {
-            format: u16_at(20),
-            channels,
-            sample_rate,
-            bits_per_sample,
-            samples: wav[44..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&pair| i16::from_le_bytes(pair))
-                .collect(),
-        }
-    }
+    use crate::test_support::{Decoded, decode};
 
     #[test]
     fn encodes_16_khz_mono_16_bit_pcm() {

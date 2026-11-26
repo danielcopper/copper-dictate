@@ -1,6 +1,6 @@
 use cpal::Sample;
 
-use crate::wav::SAMPLE_RATE;
+use crate::session::Recording;
 
 /// Turns a microphone's interleaved samples, at any rate and channel count, into
 /// 16 kHz mono, one chunk at a time.
@@ -21,7 +21,7 @@ impl Resampler {
         let channels = channels.max(1);
         Self {
             channels,
-            step: f64::from(input_rate) / f64::from(SAMPLE_RATE),
+            step: f64::from(input_rate) / f64::from(Recording::SAMPLE_RATE),
             frame: Vec::with_capacity(usize::from(channels)),
             sum: 0.0,
             filled: 0.0,

@@ -1,4 +1,3 @@
-use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -7,11 +6,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::xdg::{self, Env};
+
 pub(crate) const API_KEY_VARIABLE: &str = "COPPER_DICTATE_FINAL_API_KEY";
 const DEFAULT_MAX_RECORDING_SECONDS: u64 = 15 * 60;
-
-/// Looks up an environment variable; tests pass their own instead of the process's.
-pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Config {
@@ -28,7 +26,9 @@ pub(crate) struct FinalServerConfig {
 
 #[derive(Debug, Error)]
 pub(crate) enum ConfigError {
-    #[error("neither XDG_CONFIG_HOME nor HOME is set, so the configuration file cannot be found")]
+    #[error(
+        "neither XDG_CONFIG_HOME nor HOME is set to an absolute path, so the configuration file cannot be found"
+    )]
     NoConfigDir,
     #[error("the configuration file {0} does not exist")]
     Missing(PathBuf),
@@ -62,33 +62,22 @@ struct FinalSection {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 struct RecordingSection {
-    #[serde(default = "default_max_seconds")]
     max_seconds: u64,
 }
 
 impl Default for RecordingSection {
     fn default() -> Self {
         Self {
-            max_seconds: default_max_seconds(),
+            max_seconds: DEFAULT_MAX_RECORDING_SECONDS,
         }
     }
 }
 
-fn default_max_seconds() -> u64 {
-    DEFAULT_MAX_RECORDING_SECONDS
-}
-
 pub(crate) fn path(env: Env<'_>) -> Result<PathBuf, ConfigError> {
-    let config_home = absolute(env("XDG_CONFIG_HOME"))
-        .or_else(|| absolute(env("HOME")).map(|home| home.join(".config")))
-        .ok_or(ConfigError::NoConfigDir)?;
+    let config_home = xdg::config_home(env).ok_or(ConfigError::NoConfigDir)?;
     Ok(config_home.join("copper-dictate").join("config.toml"))
-}
-
-fn absolute(value: Option<OsString>) -> Option<PathBuf> {
-    value.map(PathBuf::from).filter(|path| path.is_absolute())
 }
 
 pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {

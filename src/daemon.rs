@@ -10,6 +10,17 @@ use thiserror::Error;
 
 use crate::protocol::{Reply, Request};
 use crate::session::{Outcome, Session};
+use crate::xdg::{self, Env};
+
+#[derive(Debug, Error)]
+#[error("XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place")]
+pub(crate) struct NoRuntimeDir;
+
+pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
+    xdg::runtime_dir(env)
+        .map(|dir| dir.join("copper-dictate").join("daemon.sock"))
+        .ok_or(NoRuntimeDir)
+}
 
 #[derive(Debug, Error)]
 pub(crate) enum BindError {
@@ -19,7 +30,6 @@ pub(crate) enum BindError {
     Io { path: PathBuf, source: io::Error },
 }
 
-/// Listens at `socket`, taking over a socket file a daemon that ended left behind.
 pub(crate) fn bind(socket: &Path) -> Result<UnixListener, BindError> {
     let io_error = |source| BindError::Io {
         path: socket.to_owned(),
@@ -78,6 +88,7 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
@@ -85,14 +96,14 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{BindError, bind, serve};
+    use std::path::{Path, PathBuf};
+
+    use super::{BindError, bind, serve, socket_path};
     use crate::config::FinalServerConfig;
     use crate::final_server::HttpFinalServer;
     use crate::session::Session;
-    use crate::session::fakes::{FakeFinalServer, FakeMicrophone};
-    use crate::test_support::{FakeHttpServer, TempDir};
+    use crate::test_support::{FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode};
     use crate::toggle;
-    use crate::wav::tests::decode;
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
 
@@ -121,12 +132,9 @@ mod tests {
         }
     }
 
-    fn socket_in(runtime_dir: &TempDir) -> std::path::PathBuf {
+    fn socket_in(runtime_dir: &TempDir) -> PathBuf {
         let runtime_dir = runtime_dir.path().as_os_str().to_owned();
-        crate::protocol::socket_path(&|name: &str| {
-            (name == "XDG_RUNTIME_DIR").then(|| runtime_dir.clone())
-        })
-        .unwrap()
+        socket_path(&|name: &str| (name == "XDG_RUNTIME_DIR").then(|| runtime_dir.clone())).unwrap()
     }
 
     fn http_final_server(url: &str) -> HttpFinalServer {
@@ -141,6 +149,23 @@ mod tests {
         (0..seconds * 16_000)
             .map(|n| if n % 40 < 20 { 4000 } else { -4000 })
             .collect()
+    }
+
+    #[test]
+    fn the_socket_lies_in_the_runtime_directory() {
+        let env =
+            |name: &str| (name == "XDG_RUNTIME_DIR").then(|| OsString::from("/run/user/1000"));
+
+        assert_eq!(
+            socket_path(&env).unwrap(),
+            Path::new("/run/user/1000/copper-dictate/daemon.sock")
+        );
+    }
+
+    #[test]
+    fn without_a_runtime_directory_there_is_no_socket() {
+        assert!(socket_path(&|_: &str| None).is_err());
+        assert!(socket_path(&|_: &str| Some(OsString::from("relative"))).is_err());
     }
 
     #[test]

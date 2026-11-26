@@ -6,17 +6,20 @@ use std::time::Duration;
 
 pub(crate) type BoxError = Box<dyn Error + Send + Sync>;
 
-/// The audio of one dictation, 16 kHz mono.
+/// The audio of one dictation, mono at [`Recording::SAMPLE_RATE`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Recording {
     pub(crate) samples: Vec<i16>,
+}
+
+impl Recording {
+    pub(crate) const SAMPLE_RATE: u32 = 16_000;
 }
 
 pub(crate) trait AudioSource: Send + Sync {
     fn start(&self) -> Result<Box<dyn Capture>, BoxError>;
 }
 
-/// A recording in progress.
 pub(crate) trait Capture: Send {
     fn stop(self: Box<Self>) -> Result<Recording, BoxError>;
 }
@@ -60,11 +63,6 @@ impl Shared {
     }
 }
 
-/// One dictation at a time: a toggle starts a recording, the next stops it and
-/// returns the final text.
-///
-/// A recording that reaches the limit stops by itself and is transcribed; the
-/// next toggle returns that text instead of starting a new recording.
 pub(crate) struct Session {
     audio: Box<dyn AudioSource>,
     final_server: Box<dyn FinalServer>,
@@ -188,106 +186,12 @@ impl Session {
 }
 
 #[cfg(test)]
-pub(crate) mod fakes {
-    use std::sync::mpsc::{self, Receiver, Sender};
-    use std::sync::{Arc, Mutex};
-
-    use super::{AudioSource, BoxError, Capture, FinalServer, Recording};
-
-    /// Hands out recordings of the given samples, and reports each start and stop.
-    pub(crate) struct FakeMicrophone {
-        samples: Vec<i16>,
-        events: Sender<&'static str>,
-    }
-
-    impl FakeMicrophone {
-        pub(crate) fn new(samples: Vec<i16>) -> (Self, Receiver<&'static str>) {
-            let (events, received) = mpsc::channel();
-            (Self { samples, events }, received)
-        }
-    }
-
-    impl AudioSource for FakeMicrophone {
-        fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
-            self.events.send("start")?;
-            Ok(Box::new(FakeCapture {
-                samples: self.samples.clone(),
-                events: self.events.clone(),
-            }))
-        }
-    }
-
-    struct FakeCapture {
-        samples: Vec<i16>,
-        events: Sender<&'static str>,
-    }
-
-    impl Capture for FakeCapture {
-        fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
-            self.events.send("stop")?;
-            Ok(Recording {
-                samples: self.samples,
-            })
-        }
-    }
-
-    pub(crate) struct BrokenMicrophone;
-
-    impl AudioSource for BrokenMicrophone {
-        fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
-            Err("no input device".into())
-        }
-    }
-
-    /// Answers each recording with the next of the given results, and keeps the recordings.
-    pub(crate) struct FakeFinalServer {
-        answers: Mutex<Vec<Result<String, String>>>,
-        pub(crate) received: Arc<Mutex<Vec<Recording>>>,
-        release: Option<Mutex<Receiver<()>>>,
-    }
-
-    impl FakeFinalServer {
-        pub(crate) fn answering(answers: &[Result<&str, &str>]) -> Self {
-            Self {
-                answers: Mutex::new(
-                    answers
-                        .iter()
-                        .rev()
-                        .map(|answer| answer.map(str::to_owned).map_err(str::to_owned))
-                        .collect(),
-                ),
-                received: Arc::default(),
-                release: None,
-            }
-        }
-
-        /// Holds each answer back until the returned sender sends.
-        pub(crate) fn held(mut self) -> (Self, Sender<()>) {
-            let (release, wait) = mpsc::channel();
-            self.release = Some(Mutex::new(wait));
-            (self, release)
-        }
-    }
-
-    impl FinalServer for FakeFinalServer {
-        fn transcribe(&self, recording: &Recording) -> Result<String, BoxError> {
-            self.received.lock().unwrap().push(recording.clone());
-            if let Some(release) = &self.release {
-                release.lock().unwrap().recv()?;
-            }
-            let answer = self.answers.lock().unwrap().pop().expect("an answer left");
-            answer.map_err(Into::into)
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::fakes::{BrokenMicrophone, FakeFinalServer, FakeMicrophone};
     use super::{Outcome, Recording, Session};
+    use crate::test_support::{BrokenMicrophone, FakeFinalServer, FakeMicrophone};
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
     const WAIT: Duration = Duration::from_secs(10);

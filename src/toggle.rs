@@ -18,8 +18,6 @@ enum ToggleError {
     Answer(#[from] serde_json::Error),
 }
 
-/// Sends one toggle to the daemon at `socket`: prints the final text on `out`, anything else
-/// on `err`, and returns whether it succeeded.
 pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bool {
     match send(socket) {
         Ok(Reply::Text { text }) => writeln!(out, "{text}").is_ok(),

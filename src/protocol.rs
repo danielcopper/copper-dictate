@@ -1,9 +1,4 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-use crate::config::Env;
 
 /// What `toggle` sends the daemon: one JSON object per line.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,41 +16,9 @@ pub(crate) enum Reply {
     Error { message: String },
 }
 
-#[derive(Debug, Error)]
-#[error("XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place")]
-pub(crate) struct NoRuntimeDir;
-
-pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
-    env("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("copper-dictate").join("daemon.sock"))
-        .ok_or(NoRuntimeDir)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-    use std::path::Path;
-
-    use super::{Reply, Request, socket_path};
-
-    #[test]
-    fn the_socket_lies_in_the_runtime_directory() {
-        let env =
-            |name: &str| (name == "XDG_RUNTIME_DIR").then(|| OsString::from("/run/user/1000"));
-
-        assert_eq!(
-            socket_path(&env).unwrap(),
-            Path::new("/run/user/1000/copper-dictate/daemon.sock")
-        );
-    }
-
-    #[test]
-    fn without_a_runtime_directory_there_is_no_socket() {
-        assert!(socket_path(&|_: &str| None).is_err());
-        assert!(socket_path(&|_: &str| Some(OsString::from("relative"))).is_err());
-    }
+    use super::{Reply, Request};
 
     #[test]
     fn messages_are_tagged_json_objects() {
