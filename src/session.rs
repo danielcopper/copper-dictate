@@ -28,25 +28,42 @@ pub(crate) trait FinalServer: Send + Sync {
     fn transcribe(&self, recording: &Recording) -> Result<String, BoxError>;
 }
 
+pub(crate) type Transcript = Result<String, String>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Started,
+    /// The toggle changed nothing: no recording started, or a transcription still runs.
+    Refused(String),
     Text(String),
     Failed(String),
 }
 
+impl Outcome {
+    pub(crate) fn into_transcript(self) -> Option<Transcript> {
+        match self {
+            Self::Text(text) => Some(Ok(text)),
+            Self::Failed(message) => Some(Err(message)),
+            Self::Started | Self::Refused(_) => None,
+        }
+    }
+}
+
+impl From<Transcript> for Outcome {
+    fn from(transcript: Transcript) -> Self {
+        match transcript {
+            Ok(text) => Self::Text(text),
+            Err(message) => Self::Failed(message),
+        }
+    }
+}
+
 enum State {
     Idle,
-    Recording {
-        id: u64,
-        capture: Box<dyn Capture>,
-    },
-    /// `claimed` once a toggle waits for this transcription's outcome.
-    Transcribing {
-        claimed: bool,
-    },
-    /// The outcome of a recording that stopped at the limit, kept for the next toggle.
-    Finished(Outcome),
+    Recording { id: u64, capture: Box<dyn Capture> },
+    Stopping,
+    AtLimit { waiter: bool },
+    Finished(Transcript),
 }
 
 struct Shared {
@@ -94,35 +111,39 @@ impl Session {
         match mem::replace(&mut shared.state, State::Idle) {
             State::Idle => self.start(shared),
             State::Recording { capture, .. } => {
-                shared.state = State::Transcribing { claimed: true };
+                shared.state = State::Stopping;
                 drop(shared);
                 self.changed.notify_all();
-                let outcome = self.finish(capture);
+                let transcript = self.finish(capture);
                 self.set(State::Idle);
-                outcome
+                transcript.into()
             }
-            State::Transcribing { claimed: false } => {
-                shared.state = State::Transcribing { claimed: true };
-                let mut shared = self
-                    .changed
-                    .wait_while(shared, |shared| {
-                        matches!(shared.state, State::Transcribing { .. })
-                    })
-                    .unwrap_or_else(PoisonError::into_inner);
-                match mem::replace(&mut shared.state, State::Idle) {
-                    State::Finished(outcome) => outcome,
-                    other => {
-                        shared.state = other;
-                        Outcome::Failed("the transcription ended without a result".to_owned())
-                    }
-                }
+            State::AtLimit { waiter: false } => {
+                shared.state = State::AtLimit { waiter: true };
+                self.wait_for_transcript(shared).into()
             }
-            State::Transcribing { claimed: true } => {
-                shared.state = State::Transcribing { claimed: true };
-                Outcome::Failed("a transcription is already in progress".to_owned())
+            busy @ (State::Stopping | State::AtLimit { waiter: true }) => {
+                shared.state = busy;
+                Outcome::Refused("a transcription is already in progress".to_owned())
             }
-            State::Finished(outcome) => outcome,
+            State::Finished(transcript) => transcript.into(),
         }
+    }
+
+    /// Holds a transcript whose toggle went away for the next toggle; false when a new
+    /// dictation has already begun.
+    pub(crate) fn keep(&self, transcript: Transcript) -> bool {
+        let mut shared = self.lock();
+        if !matches!(shared.state, State::Idle) {
+            return false;
+        }
+        shared.state = State::Finished(transcript);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn holds_a_transcript(&self) -> bool {
+        matches!(self.lock().state, State::Finished(_))
     }
 
     fn start(self: &Arc<Self>, mut shared: MutexGuard<'_, Shared>) -> Outcome {
@@ -136,7 +157,7 @@ impl Session {
                 thread::spawn(move || session.stop_at_limit(id));
                 Outcome::Started
             }
-            Err(error) => Outcome::Failed(format!("cannot start the recording: {error}")),
+            Err(error) => Outcome::Refused(format!("cannot start the recording: {error}")),
         }
     }
 
@@ -148,8 +169,7 @@ impl Session {
                 shared.recording_id() == Some(id)
             })
             .unwrap_or_else(PoisonError::into_inner);
-        let capture = match mem::replace(&mut shared.state, State::Transcribing { claimed: false })
-        {
+        let capture = match mem::replace(&mut shared.state, State::AtLimit { waiter: false }) {
             State::Recording {
                 id: current,
                 capture,
@@ -160,19 +180,35 @@ impl Session {
             }
         };
         drop(shared);
-        let outcome = self.finish(capture);
-        self.set(State::Finished(outcome));
+        let transcript = self.finish(capture);
+        self.set(State::Finished(transcript));
     }
 
-    fn finish(&self, capture: Box<dyn Capture>) -> Outcome {
-        let recording = match capture.stop() {
-            Ok(recording) => recording,
-            Err(error) => return Outcome::Failed(format!("the recording failed: {error}")),
-        };
-        match self.final_server.transcribe(&recording) {
-            Ok(text) => Outcome::Text(text),
-            Err(error) => Outcome::Failed(format!("the final server failed: {error}")),
+    fn wait_for_transcript(&self, mut shared: MutexGuard<'_, Shared>) -> Transcript {
+        loop {
+            match mem::replace(&mut shared.state, State::Idle) {
+                State::Finished(transcript) => return transcript,
+                other => {
+                    shared.state = other;
+                    shared = self
+                        .changed
+                        .wait(shared)
+                        .unwrap_or_else(PoisonError::into_inner);
+                }
+            }
         }
+    }
+
+    fn finish(&self, capture: Box<dyn Capture>) -> Transcript {
+        let recording = capture
+            .stop()
+            .map_err(|error| format!("the recording failed: {error}"))?;
+        if recording.samples.is_empty() {
+            return Err("the microphone delivered no audio, so nothing was sent".to_owned());
+        }
+        self.final_server
+            .transcribe(&recording)
+            .map_err(|error| format!("the final server failed: {error}"))
     }
 
     fn set(&self, state: State) {
@@ -191,7 +227,9 @@ mod tests {
     use std::time::Duration;
 
     use super::{Outcome, Recording, Session};
-    use crate::test_support::{BrokenMicrophone, FakeFinalServer, FakeMicrophone};
+    use crate::test_support::{
+        BrokenMicrophone, FakeFinalServer, FakeMicrophone, MicrophoneThatStops, wait_until,
+    };
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
     const WAIT: Duration = Duration::from_secs(10);
@@ -300,7 +338,7 @@ mod tests {
 
         assert_eq!(
             session.toggle(),
-            Outcome::Failed("a transcription is already in progress".to_owned())
+            Outcome::Refused("a transcription is already in progress".to_owned())
         );
         release.send(()).unwrap();
         assert_eq!(stopping.join().unwrap(), Outcome::Text("first".to_owned()));
@@ -331,7 +369,7 @@ mod tests {
 
         assert_eq!(
             session.toggle(),
-            Outcome::Failed("cannot start the recording: no input device".to_owned())
+            Outcome::Refused("cannot start the recording: no input device".to_owned())
         );
     }
 
@@ -342,14 +380,14 @@ mod tests {
         let session = Session::new(
             Box::new(microphone),
             Box::new(final_server),
-            Duration::from_millis(1000),
+            Duration::from_millis(2000),
         );
         session.toggle();
-        thread::sleep(Duration::from_millis(600));
+        thread::sleep(Duration::from_millis(1200));
         session.toggle();
 
         session.toggle();
-        thread::sleep(Duration::from_millis(600));
+        thread::sleep(Duration::from_millis(1200));
 
         assert_eq!(
             events.try_iter().collect::<Vec<_>>(),
@@ -358,11 +396,66 @@ mod tests {
         assert_eq!(session.toggle(), Outcome::Text("second".to_owned()));
     }
 
-    fn wait_until(condition: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + WAIT;
-        while !condition() {
-            assert!(std::time::Instant::now() < deadline, "timed out");
-            thread::sleep(Duration::from_millis(5));
-        }
+    #[test]
+    fn a_recording_without_audio_is_reported_and_not_sent() {
+        let (microphone, _events) = FakeMicrophone::new(Vec::new());
+        let final_server = FakeFinalServer::answering(&[]);
+        let received = final_server.received.clone();
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+
+        session.toggle();
+
+        assert_eq!(
+            session.toggle(),
+            Outcome::Failed("the microphone delivered no audio, so nothing was sent".to_owned())
+        );
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_microphone_that_stops_during_the_recording_fails_the_dictation() {
+        let session = Session::new(
+            Box::new(MicrophoneThatStops),
+            Box::new(FakeFinalServer::answering(&[])),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+
+        assert_eq!(
+            session.toggle(),
+            Outcome::Failed("the recording failed: the device is gone".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_kept_transcript_is_returned_by_the_next_toggle_instead_of_a_new_recording() {
+        let (microphone, events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("undelivered")]);
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        session.toggle();
+        let outcome = session.toggle();
+
+        assert!(session.keep(outcome.into_transcript().unwrap()));
+
+        assert_eq!(session.toggle(), Outcome::Text("undelivered".to_owned()));
+        assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
+        assert_eq!(
+            session.toggle(),
+            Outcome::Started,
+            "the session is ready again"
+        );
+    }
+
+    #[test]
+    fn a_transcript_is_not_kept_once_a_new_recording_runs() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("next")]);
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        session.toggle();
+
+        assert!(!session.keep(Ok("late".to_owned())));
+
+        assert_eq!(session.toggle(), Outcome::Text("next".to_owned()));
     }
 }

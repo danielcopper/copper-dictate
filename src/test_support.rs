@@ -6,6 +6,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::{Duration, Instant};
 use std::{fs, process};
 
 use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording};
@@ -254,6 +255,20 @@ impl Capture for FakeCapture {
     }
 }
 
+pub(crate) struct MicrophoneThatStops;
+
+impl AudioSource for MicrophoneThatStops {
+    fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
+        Ok(Box::new(MicrophoneThatStops))
+    }
+}
+
+impl Capture for MicrophoneThatStops {
+    fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
+        Err("the device is gone".into())
+    }
+}
+
 pub(crate) struct BrokenMicrophone;
 
 impl AudioSource for BrokenMicrophone {
@@ -338,5 +353,13 @@ pub(crate) fn decode(wav: &[u8]) -> Decoded {
             .iter()
             .map(|&pair| i16::from_le_bytes(pair))
             .collect(),
+    }
+}
+
+pub(crate) fn wait_until(condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !condition() {
+        assert!(Instant::now() < deadline, "timed out");
+        thread::sleep(Duration::from_millis(5));
     }
 }
