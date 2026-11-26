@@ -85,6 +85,7 @@ fn session(config: Config, audio: Box<dyn AudioSource>) -> Arc<Session> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use clap::CommandFactory;
@@ -93,6 +94,16 @@ mod tests {
     use crate::config::Config;
     use crate::session::Outcome;
     use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config, source_files};
+
+    const ROLES: [&str; 4] = ["audio", "daemon", "platform", "servers"];
+    const AT_THE_TOP: [&str; 6] = [
+        "config.rs",
+        "log.rs",
+        "main.rs",
+        "session.rs",
+        "test_support.rs",
+        "xdg.rs",
+    ];
 
     #[test]
     fn the_daemons_session_stops_at_the_configured_limit_and_sends_to_the_configured_endpoint() {
@@ -111,29 +122,43 @@ mod tests {
     }
 
     #[test]
-    fn every_module_sits_in_the_directory_of_its_role() {
-        let files: Vec<String> = source_files().into_keys().collect();
+    fn only_the_core_the_shared_modules_and_the_roles_sit_at_the_top() {
+        let misplaced: Vec<String> = source_files()
+            .into_keys()
+            .filter(|name| !name.contains('/'))
+            .filter(|name| {
+                !AT_THE_TOP.contains(&name.as_str())
+                    && !ROLES.iter().any(|role| *name == format!("{role}.rs"))
+            })
+            .collect();
 
-        assert_eq!(
-            files,
-            [
-                "audio.rs",
-                "audio/microphone.rs",
-                "audio/resample.rs",
-                "config.rs",
-                "daemon.rs",
-                "daemon/protocol.rs",
-                "daemon/toggle.rs",
-                "log.rs",
-                "main.rs",
-                "servers.rs",
-                "servers/final_server.rs",
-                "servers/wav.rs",
-                "session.rs",
-                "test_support.rs",
-                "xdg.rs",
-            ]
-        );
+        assert!(misplaced.is_empty(), "{misplaced:?}");
+    }
+
+    #[test]
+    fn every_directory_is_a_role() {
+        let unknown: BTreeSet<String> = source_files()
+            .into_keys()
+            .filter_map(|name| Some(name.split_once('/')?.0.to_owned()))
+            .filter(|directory| !ROLES.contains(&directory.as_str()))
+            .collect();
+
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_directorys_module_is_the_file_beside_it() {
+        let files = source_files();
+        let misplaced: Vec<&String> = files
+            .keys()
+            .filter(|name| {
+                name.rsplit_once('/').is_some_and(|(directory, file)| {
+                    file == "mod.rs" || !files.contains_key(&format!("{directory}.rs"))
+                })
+            })
+            .collect();
+
+        assert!(misplaced.is_empty(), "{misplaced:?}");
     }
 
     #[test]
