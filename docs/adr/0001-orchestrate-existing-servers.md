@@ -10,9 +10,10 @@ Decided in the PRD, [#4](https://github.com/danielcopper/copper-dictate/issues/4
 
 ## Context
 
-A dictation needs two models: a fast streaming one for the live text while the user speaks, and an accurate one for the
-final text when they stop. A self-hoster may already run a transcription server, such as an OpenAI-compatible Whisper
-server on a GPU, and wants the client to use it rather than run a second Whisper beside it (#4, user story 30).
+A dictation with a live preview uses two models: a fast streaming one for the live text while the user speaks, and an
+accurate one for the final text when they stop. A self-hoster may already run a transcription server, such as an
+OpenAI-compatible Whisper server on a GPU, and wants the client to use it rather than run a second Whisper beside it
+(#4, user story 30).
 
 ## Decision
 
@@ -34,10 +35,10 @@ they serve is configuration, not code.
 ## Consequences
 
 - The client speaks the two servers' protocols and follows their changes. Its tests run against small local fake servers
-  that stand in for them, never against real ones.
+  that stand in for them; no CI test runs against real ones (#4, D13).
 - The client builds the vocabulary prompt from the term list and sends it with the final request; the filter for a
   repeated last sentence and the replacement list run in the client.
 - The live server is a second server to run, so the live preview is optional: with only a final server, the client still
   dictates.
-- Someone without servers of their own starts them from the repository's reference compose files (#4, D11); operating
-  the servers is not part of the client.
+- Someone without servers of their own is to start them from the reference compose files the repository will ship (#4,
+  D11); operating the servers is not part of the client.
