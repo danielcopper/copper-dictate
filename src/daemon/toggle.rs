@@ -1,10 +1,10 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::daemon::protocol::{Reply, Request};
+use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
 
 #[derive(Debug, Error)]
 enum ToggleError {
@@ -60,20 +60,19 @@ fn warn_of_glitches(glitches: u32, err: &mut dyn Write) {
 }
 
 fn send(socket: &Path) -> Result<Reply, ToggleError> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
+    let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
             ToggleError::NotRunning(socket.to_owned())
         }
         _ => ToggleError::Io(error),
     })?;
-    let mut request = serde_json::to_string(&Request::Toggle)?;
-    request.push('\n');
-    stream.write_all(request.as_bytes())?;
-    let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line)? == 0 {
-        return Err(ToggleError::NoAnswer);
+    write_message(&stream, &Request::Toggle)?;
+    match read_message(&stream) {
+        Ok(Some(reply)) => Ok(reply),
+        Ok(None) => Err(ToggleError::NoAnswer),
+        Err(ReadError::Io(error)) => Err(ToggleError::Io(error)),
+        Err(ReadError::Json(error)) => Err(ToggleError::Answer(error)),
     }
-    Ok(serde_json::from_str(&line)?)
 }
 
 #[cfg(test)]

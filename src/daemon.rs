@@ -2,7 +2,7 @@ pub(crate) mod protocol;
 pub(crate) mod toggle;
 
 use std::fs::{self, DirBuilder};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -12,21 +12,10 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::daemon::protocol::{Reply, Request};
+use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
 use crate::session::{Outcome, Session};
-use crate::xdg::{self, Env};
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
-
-#[derive(Debug, Error)]
-#[error("XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place")]
-pub(crate) struct NoRuntimeDir;
-
-pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
-    xdg::runtime_dir(env)
-        .map(|dir| dir.join("copper-dictate").join("daemon.sock"))
-        .ok_or(NoRuntimeDir)
-}
 
 #[derive(Debug, Error)]
 pub(crate) enum BindError {
@@ -89,14 +78,12 @@ fn serve_connections(
 }
 
 fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
-    let mut line = String::new();
-    if BufReader::new(connection).read_line(&mut line)? == 0 {
-        return Ok(());
-    }
-    let outcome = match serde_json::from_str::<Request>(&line) {
-        Ok(Request::Toggle) => session.toggle(),
-        Err(error) => {
-            return send(
+    let outcome = match read_message::<Request>(connection) {
+        Ok(None) => return Ok(()),
+        Ok(Some(Request::Toggle)) => session.toggle(),
+        Err(ReadError::Io(error)) => return Err(error),
+        Err(ReadError::Json(error)) => {
+            return write_message(
                 connection,
                 &Reply::Error {
                     message: format!("not a request: {error}"),
@@ -114,7 +101,7 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
             message: message.clone(),
         },
     };
-    let Err(error) = send(connection, &reply) else {
+    let Err(error) = write_message(connection, &reply) else {
         return Ok(());
     };
     let Outcome::Done(transcript) = outcome else {
@@ -132,26 +119,19 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     Ok(())
 }
 
-fn send(mut connection: &UnixStream, reply: &Reply) -> io::Result<()> {
-    let mut answer = serde_json::to_string(reply)?;
-    answer.push('\n');
-    connection.write_all(answer.as_bytes())
-}
-
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::io::{self, BufRead, BufReader, Read, Write};
     use std::net::Shutdown;
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::net::UnixStream;
+    use std::path::PathBuf;
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
 
-    use std::path::{Path, PathBuf};
-
-    use super::{BindError, bind, serve, serve_connections, socket_path};
+    use super::{BindError, bind, serve, serve_connections};
+    use crate::daemon::protocol::socket_path;
     use crate::daemon::toggle;
     use crate::servers::final_server::HttpFinalServer;
     use crate::session::{Outcome, Session};
@@ -207,23 +187,6 @@ mod tests {
         (0..seconds * 16_000)
             .map(|n| if n % 40 < 20 { 4000 } else { -4000 })
             .collect()
-    }
-
-    #[test]
-    fn the_socket_lies_in_the_runtime_directory() {
-        let env =
-            |name: &str| (name == "XDG_RUNTIME_DIR").then(|| OsString::from("/run/user/1000"));
-
-        assert_eq!(
-            socket_path(&env).unwrap(),
-            Path::new("/run/user/1000/copper-dictate/daemon.sock")
-        );
-    }
-
-    #[test]
-    fn without_a_runtime_directory_there_is_no_socket() {
-        assert!(socket_path(&|_: &str| None).is_err());
-        assert!(socket_path(&|_: &str| Some(OsString::from("relative"))).is_err());
     }
 
     #[test]

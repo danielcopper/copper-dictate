@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 
 use crate::audio::microphone::Microphone;
 use crate::config::Config;
+use crate::daemon::protocol;
 use crate::servers::final_server::HttpFinalServer;
 use crate::session::{AudioSource, BoxError, Session};
 use crate::xdg::Env;
@@ -46,7 +47,7 @@ fn main() -> ExitCode {
                 false
             }
         },
-        Command::Toggle => match daemon::socket_path(&env) {
+        Command::Toggle => match protocol::socket_path(&env) {
             Ok(socket) => {
                 daemon::toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock())
             }
@@ -65,7 +66,7 @@ fn main() -> ExitCode {
 
 fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
-    let socket = daemon::socket_path(env)?;
+    let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
     let session = session(config, Box::new(Microphone));
     eprintln!("copper-dictate: listening at {}", socket.display());
