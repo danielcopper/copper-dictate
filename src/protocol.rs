@@ -12,8 +12,15 @@ pub(crate) enum Request {
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum Reply {
     Recording,
-    Text { text: String },
-    Error { message: String },
+    /// `glitches`: how often the microphone recovered from an error during the recording.
+    Text {
+        text: String,
+        #[serde(default)]
+        glitches: u32,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[cfg(test)]
@@ -32,10 +39,11 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_string(&Reply::Text {
-                text: "hi".to_owned()
+                text: "hi".to_owned(),
+                glitches: 2,
             })
             .unwrap(),
-            r#"{"event":"text","text":"hi"}"#
+            r#"{"event":"text","text":"hi","glitches":2}"#
         );
         assert_eq!(
             serde_json::to_string(&Reply::Error {

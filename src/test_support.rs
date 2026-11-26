@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{fs, process};
 
-use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording};
+use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording, Stopped};
 
 pub(crate) struct TempDir(PathBuf);
 
@@ -220,14 +220,22 @@ pub(crate) fn read_request(reader: &mut impl BufRead) -> Request {
 }
 
 pub(crate) struct FakeMicrophone {
-    samples: Vec<i16>,
+    stopped: Stopped,
     events: Sender<&'static str>,
 }
 
 impl FakeMicrophone {
     pub(crate) fn new(samples: Vec<i16>) -> (Self, Receiver<&'static str>) {
+        Self::glitching(samples, 0)
+    }
+
+    pub(crate) fn glitching(samples: Vec<i16>, glitches: u32) -> (Self, Receiver<&'static str>) {
         let (events, received) = mpsc::channel();
-        (Self { samples, events }, received)
+        let stopped = Stopped {
+            recording: Recording { samples },
+            glitches,
+        };
+        (Self { stopped, events }, received)
     }
 }
 
@@ -235,23 +243,21 @@ impl AudioSource for FakeMicrophone {
     fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
         self.events.send("start")?;
         Ok(Box::new(FakeCapture {
-            samples: self.samples.clone(),
+            stopped: self.stopped.clone(),
             events: self.events.clone(),
         }))
     }
 }
 
 struct FakeCapture {
-    samples: Vec<i16>,
+    stopped: Stopped,
     events: Sender<&'static str>,
 }
 
 impl Capture for FakeCapture {
-    fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
+    fn stop(self: Box<Self>) -> Result<Stopped, BoxError> {
         self.events.send("stop")?;
-        Ok(Recording {
-            samples: self.samples,
-        })
+        Ok(self.stopped)
     }
 }
 
@@ -264,7 +270,7 @@ impl AudioSource for MicrophoneThatStops {
 }
 
 impl Capture for MicrophoneThatStops {
-    fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
+    fn stop(self: Box<Self>) -> Result<Stopped, BoxError> {
         Err("the device is gone".into())
     }
 }

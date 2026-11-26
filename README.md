@@ -70,7 +70,9 @@ copper-dictate toggle   # stop it; prints the final text
 
 `toggle` talks to the daemon over `$XDG_RUNTIME_DIR/copper-dictate/daemon.sock`. A recording that reaches `max_seconds`
 stops and is transcribed by itself; the next `toggle` prints its text instead of starting a new recording. The same
-holds for a text whose `toggle` was interrupted before it arrived.
+holds for the text, or the error, of a `toggle` that was interrupted before it arrived. A microphone glitch the audio
+stack recovers from (an overrun, a device change) does not end the recording; the `toggle` that prints its text also
+warns on stderr how often the microphone glitched. Any other microphone error fails the dictation.
 
 ## Development
 

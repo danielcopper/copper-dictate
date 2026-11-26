@@ -7,7 +7,7 @@ use cpal::{
 };
 
 use crate::resample::Resampler;
-use crate::session::{AudioSource, BoxError, Capture, Recording};
+use crate::session::{AudioSource, BoxError, Capture, Recording, Stopped};
 
 /// The default input device of the default audio host (ALSA on Linux).
 pub(crate) struct Microphone;
@@ -20,6 +20,7 @@ struct MicrophoneCapture {
 struct Captured {
     resampler: Resampler,
     samples: Vec<i16>,
+    glitches: u32,
     failure: Option<cpal::Error>,
 }
 
@@ -28,6 +29,7 @@ impl Captured {
         Self {
             resampler: Resampler::new(input_rate, channels),
             samples: Vec::new(),
+            glitches: 0,
             failure: None,
         }
     }
@@ -43,18 +45,22 @@ impl Captured {
             ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
         ) {
             eprintln!("copper-dictate: the microphone reported a glitch: {error}");
+            self.glitches = self.glitches.saturating_add(1);
         } else if self.failure.is_none() {
             self.failure = Some(error);
         }
     }
 
-    fn take(&mut self) -> Result<Recording, BoxError> {
+    fn take(&mut self) -> Result<Stopped, BoxError> {
         match self.failure.take() {
             Some(error) => {
                 Err(format!("the microphone stopped during the recording: {error}").into())
             }
-            None => Ok(Recording {
-                samples: mem::take(&mut self.samples),
+            None => Ok(Stopped {
+                recording: Recording {
+                    samples: mem::take(&mut self.samples),
+                },
+                glitches: mem::take(&mut self.glitches),
             }),
         }
     }
@@ -91,7 +97,7 @@ impl AudioSource for Microphone {
 }
 
 impl Capture for MicrophoneCapture {
-    fn stop(self: Box<Self>) -> Result<Recording, BoxError> {
+    fn stop(self: Box<Self>) -> Result<Stopped, BoxError> {
         let Self { stream, captured } = *self;
         drop(stream);
         lock(&captured).take()
@@ -168,6 +174,19 @@ mod tests {
         captured.report(cpal::Error::new(ErrorKind::Xrun));
         captured.push([0.5; 160]);
 
-        assert_eq!(captured.take().unwrap().samples.len(), 320);
+        assert_eq!(captured.take().unwrap().recording.samples.len(), 320);
+    }
+
+    #[test]
+    fn every_glitch_the_stream_recovers_from_is_counted() {
+        let mut captured = Captured::new(16_000, 1);
+        captured.push([0.5; 160]);
+
+        captured.report(cpal::Error::new(ErrorKind::Xrun));
+        captured.report(cpal::Error::new(ErrorKind::DeviceChanged));
+        captured.report(cpal::Error::new(ErrorKind::RealtimeDenied));
+        captured.report(cpal::Error::new(ErrorKind::Xrun));
+
+        assert_eq!(captured.take().unwrap().glitches, 4);
     }
 }

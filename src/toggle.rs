@@ -22,8 +22,11 @@ enum ToggleError {
 
 pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bool {
     match send(socket) {
-        Ok(Reply::Text { text }) => match writeln!(out, "{text}") {
-            Ok(()) => true,
+        Ok(Reply::Text { text, glitches }) => match writeln!(out, "{text}") {
+            Ok(()) => {
+                warn_of_glitches(glitches, err);
+                true
+            }
             Err(error) => {
                 let _ = writeln!(err, "copper-dictate: cannot print the final text: {error}");
                 false
@@ -42,6 +45,18 @@ pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bo
             false
         }
     }
+}
+
+fn warn_of_glitches(glitches: u32, err: &mut dyn Write) {
+    let times = match glitches {
+        0 => return,
+        1 => "once".to_owned(),
+        n => format!("{n} times"),
+    };
+    let _ = writeln!(
+        err,
+        "copper-dictate: warning: the microphone glitched {times} during the recording; parts of the audio may be missing"
+    );
 }
 
 fn send(socket: &Path) -> Result<Reply, ToggleError> {

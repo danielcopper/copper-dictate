@@ -20,22 +20,36 @@ pub(crate) trait AudioSource: Send + Sync {
     fn start(&self) -> Result<Box<dyn Capture>, BoxError>;
 }
 
+/// A stopped capture: its audio, and how often the audio stack recovered from an error
+/// during it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Stopped {
+    pub(crate) recording: Recording,
+    pub(crate) glitches: u32,
+}
+
 pub(crate) trait Capture: Send {
-    fn stop(self: Box<Self>) -> Result<Recording, BoxError>;
+    fn stop(self: Box<Self>) -> Result<Stopped, BoxError>;
 }
 
 pub(crate) trait FinalServer: Send + Sync {
     fn transcribe(&self, recording: &Recording) -> Result<String, BoxError>;
 }
 
-pub(crate) type Transcript = Result<String, String>;
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct FinalText {
+    pub(crate) text: String,
+    pub(crate) glitches: u32,
+}
+
+pub(crate) type Transcript = Result<FinalText, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
     Started,
     /// The toggle changed nothing: no recording started, or a transcription still runs.
     Refused(String),
-    Text(String),
+    Text(FinalText),
     Failed(String),
 }
 
@@ -200,15 +214,20 @@ impl Session {
     }
 
     fn finish(&self, capture: Box<dyn Capture>) -> Transcript {
-        let recording = capture
+        let Stopped {
+            recording,
+            glitches,
+        } = capture
             .stop()
             .map_err(|error| format!("the recording failed: {error}"))?;
         if recording.samples.is_empty() {
             return Err("the microphone delivered no audio, so nothing was sent".to_owned());
         }
-        self.final_server
+        let text = self
+            .final_server
             .transcribe(&recording)
-            .map_err(|error| format!("the final server failed: {error}"))
+            .map_err(|error| format!("the final server failed: {error}"))?;
+        Ok(FinalText { text, glitches })
     }
 
     fn set(&self, state: State) {
@@ -226,13 +245,24 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{Outcome, Recording, Session};
+    use super::{FinalText, Outcome, Recording, Session};
     use crate::test_support::{
         BrokenMicrophone, FakeFinalServer, FakeMicrophone, MicrophoneThatStops, wait_until,
     };
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
     const WAIT: Duration = Duration::from_secs(10);
+
+    fn final_text(text: &str) -> FinalText {
+        FinalText {
+            text: text.to_owned(),
+            glitches: 0,
+        }
+    }
+
+    fn text(text: &str) -> Outcome {
+        Outcome::Text(final_text(text))
+    }
 
     #[test]
     fn a_toggle_starts_a_recording_and_the_next_returns_its_final_text() {
@@ -243,7 +273,7 @@ mod tests {
 
         assert_eq!(session.toggle(), Outcome::Started);
         assert_eq!(events.try_recv(), Ok("start"));
-        assert_eq!(session.toggle(), Outcome::Text("hello".to_owned()));
+        assert_eq!(session.toggle(), text("hello"));
         assert_eq!(events.try_recv(), Ok("stop"));
         assert_eq!(
             *received.lock().unwrap(),
@@ -263,7 +293,7 @@ mod tests {
         session.toggle();
 
         assert_eq!(session.toggle(), Outcome::Started);
-        assert_eq!(session.toggle(), Outcome::Text("two".to_owned()));
+        assert_eq!(session.toggle(), text("two"));
         assert_eq!(
             events.try_iter().collect::<Vec<_>>(),
             ["start", "stop", "start", "stop"]
@@ -286,7 +316,7 @@ mod tests {
         assert_eq!(events.recv_timeout(WAIT), Ok("stop"));
         wait_until(|| !received.lock().unwrap().is_empty());
 
-        assert_eq!(session.toggle(), Outcome::Text("at the limit".to_owned()));
+        assert_eq!(session.toggle(), text("at the limit"));
         assert_eq!(
             *received.lock().unwrap(),
             [Recording {
@@ -316,10 +346,7 @@ mod tests {
         thread::sleep(Duration::from_millis(50));
         release.send(()).unwrap();
 
-        assert_eq!(
-            toggle.join().unwrap(),
-            Outcome::Text("waited for".to_owned())
-        );
+        assert_eq!(toggle.join().unwrap(), text("waited for"));
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
     }
 
@@ -341,7 +368,7 @@ mod tests {
             Outcome::Refused("a transcription is already in progress".to_owned())
         );
         release.send(()).unwrap();
-        assert_eq!(stopping.join().unwrap(), Outcome::Text("first".to_owned()));
+        assert_eq!(stopping.join().unwrap(), text("first"));
     }
 
     #[test]
@@ -356,7 +383,7 @@ mod tests {
             Outcome::Failed("the final server failed: connection refused".to_owned())
         );
         assert_eq!(session.toggle(), Outcome::Started);
-        assert_eq!(session.toggle(), Outcome::Text("again".to_owned()));
+        assert_eq!(session.toggle(), text("again"));
     }
 
     #[test]
@@ -393,7 +420,7 @@ mod tests {
             events.try_iter().collect::<Vec<_>>(),
             ["start", "stop", "start"]
         );
-        assert_eq!(session.toggle(), Outcome::Text("second".to_owned()));
+        assert_eq!(session.toggle(), text("second"));
     }
 
     #[test]
@@ -429,6 +456,23 @@ mod tests {
     }
 
     #[test]
+    fn the_glitches_of_a_recording_reach_its_final_text() {
+        let (microphone, _events) = FakeMicrophone::glitching(vec![1], 5);
+        let final_server = FakeFinalServer::answering(&[Ok("glitchy")]);
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+
+        session.toggle();
+
+        assert_eq!(
+            session.toggle(),
+            Outcome::Text(FinalText {
+                text: "glitchy".to_owned(),
+                glitches: 5,
+            })
+        );
+    }
+
+    #[test]
     fn a_kept_transcript_is_returned_by_the_next_toggle_instead_of_a_new_recording() {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Ok("undelivered")]);
@@ -438,7 +482,7 @@ mod tests {
 
         assert!(session.keep(outcome.into_transcript().unwrap()));
 
-        assert_eq!(session.toggle(), Outcome::Text("undelivered".to_owned()));
+        assert_eq!(session.toggle(), text("undelivered"));
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
         assert_eq!(
             session.toggle(),
@@ -454,8 +498,8 @@ mod tests {
         let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         session.toggle();
 
-        assert!(!session.keep(Ok("late".to_owned())));
+        assert!(!session.keep(Ok(final_text("late"))));
 
-        assert_eq!(session.toggle(), Outcome::Text("next".to_owned()));
+        assert_eq!(session.toggle(), text("next"));
     }
 }

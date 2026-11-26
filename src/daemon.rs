@@ -96,7 +96,10 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     };
     let reply = match &outcome {
         Outcome::Started => Reply::Recording,
-        Outcome::Text(text) => Reply::Text { text: text.clone() },
+        Outcome::Text(final_text) => Reply::Text {
+            text: final_text.text.clone(),
+            glitches: final_text.glitches,
+        },
         Outcome::Refused(message) | Outcome::Failed(message) => Reply::Error {
             message: message.clone(),
         },
@@ -112,11 +115,11 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     };
     if session.keep(transcript) {
         eprintln!(
-            "copper-dictate: the toggle went away before its final text arrived; the next toggle prints it"
+            "copper-dictate: the toggle went away before its final text or failure arrived; the next toggle prints it"
         );
     } else {
         eprintln!(
-            "copper-dictate: the toggle went away before its final text arrived, and a new dictation has begun; the text is lost"
+            "copper-dictate: the toggle went away before its final text or failure arrived, and a new dictation has begun; it is lost"
         );
     }
     Ok(())
@@ -340,6 +343,71 @@ mod tests {
             (true, "kept for later\n".to_owned(), String::new())
         );
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);
+    }
+
+    #[test]
+    fn a_dictation_the_microphone_glitched_in_prints_its_text_and_warns_how_often() {
+        let (microphone, _events) = FakeMicrophone::glitching(vec![1], 3);
+        let daemon = Daemon::start(Session::new(
+            Box::new(microphone),
+            Box::new(FakeFinalServer::answering(&[Ok("despite the glitches")])),
+            NO_LIMIT,
+        ));
+
+        daemon.toggle();
+
+        assert_eq!(
+            daemon.toggle(),
+            (
+                true,
+                "despite the glitches\n".to_owned(),
+                "copper-dictate: warning: the microphone glitched 3 times during the recording; parts of the audio may be missing\n".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn the_glitch_warning_of_a_recording_stopped_at_the_limit_reaches_the_next_toggle() {
+        let (microphone, _events) = FakeMicrophone::glitching(vec![1], 1);
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(FakeFinalServer::answering(&[Ok("cut at the limit")])),
+            Duration::from_millis(50),
+        );
+        let daemon = Daemon::start(Arc::clone(&session));
+        daemon.toggle();
+        wait_until(|| session.holds_a_transcript());
+
+        assert_eq!(
+            daemon.toggle(),
+            (
+                true,
+                "cut at the limit\n".to_owned(),
+                "copper-dictate: warning: the microphone glitched once during the recording; parts of the audio may be missing\n".to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn the_glitch_warning_of_a_text_whose_toggle_went_away_reaches_the_next_toggle() {
+        let (microphone, _events) = FakeMicrophone::glitching(vec![1], 2);
+        let (final_server, release) = FakeFinalServer::answering(&[Ok("kept for later")]).held();
+        let received = final_server.received.clone();
+        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let daemon = Daemon::start(Arc::clone(&session));
+        daemon.toggle();
+        let mut gone = UnixStream::connect(socket_in(&daemon.runtime_dir)).unwrap();
+        gone.write_all(b"{\"command\":\"toggle\"}\n").unwrap();
+        wait_until(|| !received.lock().unwrap().is_empty());
+
+        drop(gone);
+        release.send(()).unwrap();
+        wait_until(|| session.holds_a_transcript());
+
+        let (succeeded, out, err) = daemon.toggle();
+        assert!(succeeded);
+        assert_eq!(out, "kept for later\n");
+        assert!(err.contains("the microphone glitched 2 times"), "{err}");
     }
 
     #[test]
