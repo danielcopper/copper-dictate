@@ -1,14 +1,10 @@
+mod audio;
 mod config;
 mod daemon;
-mod final_server;
-mod microphone;
-mod protocol;
-mod resample;
+mod servers;
 mod session;
 #[cfg(test)]
 mod test_support;
-mod toggle;
-mod wav;
 mod xdg;
 
 use std::ffi::OsString;
@@ -18,9 +14,9 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
+use crate::audio::microphone::Microphone;
 use crate::config::Config;
-use crate::final_server::HttpFinalServer;
-use crate::microphone::Microphone;
+use crate::servers::final_server::HttpFinalServer;
 use crate::session::{AudioSource, BoxError, Session};
 use crate::xdg::Env;
 
@@ -51,7 +47,9 @@ fn main() -> ExitCode {
             }
         },
         Command::Toggle => match daemon::socket_path(&env) {
-            Ok(socket) => toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock()),
+            Ok(socket) => {
+                daemon::toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock())
+            }
             Err(error) => {
                 eprintln!("copper-dictate: {error}");
                 false
@@ -85,6 +83,8 @@ fn session(config: Config, audio: Box<dyn AudioSource>) -> Arc<Session> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::path::Path;
     use std::time::Duration;
 
     use clap::CommandFactory;
@@ -108,6 +108,45 @@ mod tests {
 
         let request = fake.requests.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(request.path, "/v1/audio/transcriptions");
+    }
+
+    fn rust_files(dir: &Path, base: &Path, files: &mut Vec<String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, base, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path.strip_prefix(base).unwrap().display().to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn every_module_sits_in_the_directory_of_its_role() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_files(&src, &src, &mut files);
+        files.sort();
+
+        assert_eq!(
+            files,
+            [
+                "audio.rs",
+                "audio/microphone.rs",
+                "audio/resample.rs",
+                "config.rs",
+                "daemon.rs",
+                "daemon/protocol.rs",
+                "daemon/toggle.rs",
+                "main.rs",
+                "servers.rs",
+                "servers/final_server.rs",
+                "servers/wav.rs",
+                "session.rs",
+                "test_support.rs",
+                "xdg.rs",
+            ]
+        );
     }
 
     #[test]

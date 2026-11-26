@@ -7,7 +7,7 @@ use cpal::{
     SupportedStreamConfigRange,
 };
 
-use crate::resample::Resampler;
+use crate::audio::resample::Resampler;
 use crate::session::{AudioSource, BoxError, Capture, Recording, Stopped};
 
 /// The default input device of the default audio host (ALSA on Linux).

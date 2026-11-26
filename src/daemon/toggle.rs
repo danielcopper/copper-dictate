@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::protocol::{Reply, Request};
+use crate::daemon::protocol::{Reply, Request};
 
 #[derive(Debug, Error)]
 enum ToggleError {

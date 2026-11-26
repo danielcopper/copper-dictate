@@ -1,3 +1,6 @@
+pub(crate) mod protocol;
+pub(crate) mod toggle;
+
 use std::fs::{self, DirBuilder};
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::fs::DirBuilderExt;
@@ -9,7 +12,7 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::protocol::{Reply, Request};
+use crate::daemon::protocol::{Reply, Request};
 use crate::session::{Outcome, Session};
 use crate::xdg::{self, Env};
 
@@ -149,13 +152,13 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{BindError, bind, serve, serve_connections, socket_path};
-    use crate::final_server::HttpFinalServer;
+    use crate::daemon::toggle;
+    use crate::servers::final_server::HttpFinalServer;
     use crate::session::{Outcome, Session};
     use crate::test_support::{
         BrokenMicrophone, FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode,
         final_server_config, wait_until,
     };
-    use crate::toggle;
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
 
