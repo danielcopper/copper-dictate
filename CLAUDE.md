@@ -3,10 +3,13 @@
 ## What This Is
 
 Self-hosted live dictation for Linux desktops: live preview while you speak, an accurate final text when you stop. Today
-the repository holds only the scaffold — one crate whose binary prints its version for `--version`, and the CI, Sonar
-and release pipeline around it. Planned: a client daemon in Rust that takes the live text from a realtime WebSocket
-server and the final text from an OpenAI-compatible transcription server, with the platform parts behind interfaces, KDE
-first.
+the final-text path works: `copper-dictate daemon` records from the default microphone (cpal, so ALSA) on a
+`copper-dictate toggle`, and the next `toggle` sends the whole recording to an OpenAI-compatible transcription server
+and prints the text. The two talk over a Unix socket in `$XDG_RUNTIME_DIR/copper-dictate/`; the configuration is
+`$XDG_CONFIG_HOME/copper-dictate/config.toml`, and the API key comes from `api_key_file` or
+`COPPER_DICTATE_FINAL_API_KEY`, never from that file. The session logic in `src/session.rs` is platform-independent,
+with the audio source and the final server behind traits. Planned: the live text from a realtime WebSocket server, and
+the shortcut, insertion and overlay as platform parts behind interfaces, KDE first.
 
 ## Where decisions live
 
@@ -24,9 +27,10 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
 ## Development
 
 - **Setup** `mise run setup` (the toolchain from `rust-toolchain.toml`, the cargo tools and deno from `mise.toml`, and
-  `core.hooksPath .githooks`) · **Tests** `mise run test` (nextest; unit tests beside the code in `src/`, the binary's
-  tests in `tests/`) · **Lint** `mise run lint` (clippy, warnings as errors) · **Coverage** `mise run coverage` →
-  `lcov.info`.
+  `core.hooksPath .githooks`; building also needs the ALSA development files and pkg-config: `libasound2-dev` and
+  `pkg-config` on Debian and Ubuntu) · **Tests** `mise run test` (nextest; unit tests beside the code in `src/`, the
+  binary's tests in `tests/`) · **Lint** `mise run lint` (clippy, warnings as errors) · **Coverage** `mise run coverage`
+  → `lcov.info`.
 - **Toolchain** `rust-toolchain.toml` is the one source for the Rust version; CI, mise and rustup all read it. The cargo
   tools and deno are pinned in `mise.toml`, and CI installs them from there.
 - **Lints** are denied in `Cargo.toml` (`[lints]`), not only in CI: clippy `all` and `pedantic`, and no `unwrap` or

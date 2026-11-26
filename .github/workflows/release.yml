@@ -84,6 +84,10 @@ jobs:
           version: 2026.11.14
           cache: false
 
+      # cpal, the microphone capture, links libasound through alsa-sys, whose build script finds it with pkg-config.
+      - name: Install the ALSA development files
+        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends libasound2-dev pkg-config
+
       - name: Build the release binary
         run: cargo build --release --locked --target x86_64-unknown-linux-gnu
 
