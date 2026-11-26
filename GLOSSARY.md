@@ -8,8 +8,8 @@ This glossary fixes what the project's terms mean; the decisions behind them are
 ### Dictation
 
 **Dictation**:\
-Speech turned into text at the cursor. A dictation is one run from start to stop, with its recording, its live text and
-its final text; a cancel discards it.
+Speech turned into text at the cursor. A dictation is one run from start to stop, with its recording, its final text
+and, with the live preview, its live text; a cancel discards it.
 
 **Live text**:\
 The provisional text the live server returns while the user speaks; it may still change.\
@@ -21,8 +21,8 @@ final text.\
 _Avoid_: live transcript
 
 **Final text**:\
-The accurate text of a whole recording, computed once by the final server when the user stops. Corrected by the
-replacement list, it is the text inserted at the cursor.\
+The accurate text of a whole recording, computed once by the final server when the user stops. It is the text inserted
+at the cursor.\
 _Avoid_: final transcript, result
 
 ### Servers
