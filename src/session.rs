@@ -150,13 +150,16 @@ impl Session {
                 shared.recording_id() == Some(id)
             })
             .unwrap_or_else(PoisonError::into_inner);
-        if shared.recording_id() != Some(id) {
-            return;
-        }
-        let State::Recording { capture, .. } =
-            mem::replace(&mut shared.state, State::Transcribing { claimed: false })
-        else {
-            return;
+        let capture = match mem::replace(&mut shared.state, State::Transcribing { claimed: false })
+        {
+            State::Recording {
+                id: current,
+                capture,
+            } if current == id => capture,
+            other => {
+                shared.state = other;
+                return;
+            }
         };
         drop(shared);
         let outcome = self.finish(capture);
