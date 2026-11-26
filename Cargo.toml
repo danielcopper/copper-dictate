@@ -10,6 +10,15 @@ publish = false
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+cpal = "0.18"
+# ring, not aws-lc-rs: aws-lc-sys carries the OpenSSL licence, which deny.toml rejects.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
+# The platform verifier, not webpki-roots: that crate's CDLA-Permissive-2.0 licence is not in deny.toml.
+ureq = { version = "3", default-features = false, features = ["platform-verifier", "rustls-no-provider"] }
 
 [lints.rust]
 unsafe_code = "forbid"
