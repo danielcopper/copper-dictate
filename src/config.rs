@@ -1,3 +1,4 @@
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -5,10 +6,11 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
+use ureq::http::Uri;
 
 use crate::xdg::{self, Env};
 
-pub(crate) const API_KEY_VARIABLE: &str = "COPPER_DICTATE_FINAL_API_KEY";
+const API_KEY_VARIABLE: &str = "COPPER_DICTATE_FINAL_API_KEY";
 const DEFAULT_MAX_RECORDING_SECONDS: u64 = 15 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,9 +21,49 @@ pub(crate) struct Config {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FinalServerConfig {
-    pub(crate) endpoint: String,
+    pub(crate) endpoint: Uri,
     pub(crate) model: String,
-    pub(crate) api_key: Option<String>,
+    pub(crate) api_key: Option<ApiKey>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct ApiKey(String);
+
+impl ApiKey {
+    pub(crate) fn parse(raw: &[u8]) -> Result<Self, KeyError> {
+        let key = raw.trim_ascii();
+        if key.is_empty() {
+            return Err(KeyError::Empty);
+        }
+        if !key.iter().all(u8::is_ascii_graphic) {
+            return Err(KeyError::Invalid);
+        }
+        String::from_utf8(key.to_vec())
+            .map(Self)
+            .map_err(|_| KeyError::Invalid)
+    }
+
+    pub(crate) fn bearer(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
+impl fmt::Debug for ApiKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("ApiKey(..)")
+    }
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum KeyError {
+    #[error("cannot be read: {0}")]
+    Read(io::Error),
+    #[error("is empty")]
+    Empty,
+    #[error(
+        "holds no valid key: only visible ASCII characters are allowed, without spaces or line breaks"
+    )]
+    Invalid,
 }
 
 #[derive(Debug, Error)]
@@ -36,12 +78,14 @@ pub(crate) enum ConfigError {
     Read { path: PathBuf, source: io::Error },
     #[error("the configuration file {path} is invalid: {message}")]
     Invalid { path: PathBuf, message: String },
-    #[error("cannot read the API key file {path} (api_key_file in {config}): {source}")]
+    #[error("the API key file {path} (api_key_file in {config}) {problem}")]
     KeyFile {
         path: PathBuf,
         config: PathBuf,
-        source: io::Error,
+        problem: KeyError,
     },
+    #[error("the environment variable {API_KEY_VARIABLE} {0}")]
+    KeyVariable(KeyError),
 }
 
 #[derive(Deserialize)]
@@ -99,20 +143,36 @@ pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {
         ));
     }
 
-    let api_key = match &file.final_server.api_key_file {
-        Some(key_file) => Some(read_key(key_file).map_err(|source| ConfigError::KeyFile {
-            path: key_file.clone(),
-            config: path.to_owned(),
-            source,
-        })?),
-        None => env(API_KEY_VARIABLE)
-            .and_then(|key| key.into_string().ok())
-            .filter(|key| !key.is_empty()),
+    let endpoint = parse_endpoint(&file.final_server.endpoint).ok_or_else(|| {
+        invalid(format!(
+            "endpoint in [final] must be an http or https URL with a host, not {:?}",
+            file.final_server.endpoint
+        ))
+    })?;
+
+    let api_key = match file.final_server.api_key_file {
+        Some(key_file) => {
+            let key_file = path.parent().unwrap_or(Path::new("")).join(key_file);
+            let key = fs::read(&key_file)
+                .map_err(KeyError::Read)
+                .and_then(|raw| ApiKey::parse(&raw));
+            Some(key.map_err(|problem| ConfigError::KeyFile {
+                path: key_file,
+                config: path.to_owned(),
+                problem,
+            })?)
+        }
+        None => match env(API_KEY_VARIABLE) {
+            Some(value) if !value.is_empty() => {
+                Some(ApiKey::parse(value.as_encoded_bytes()).map_err(ConfigError::KeyVariable)?)
+            }
+            _ => None,
+        },
     };
 
     Ok(Config {
         final_server: FinalServerConfig {
-            endpoint: file.final_server.endpoint,
+            endpoint,
             model: file.final_server.model,
             api_key,
         },
@@ -120,18 +180,22 @@ pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {
     })
 }
 
-fn read_key(path: &Path) -> io::Result<String> {
-    Ok(fs::read_to_string(path)?.trim().to_owned())
+fn parse_endpoint(text: &str) -> Option<Uri> {
+    let uri: Uri = text.parse().ok()?;
+    let web = matches!(uri.scheme_str(), Some("http" | "https"));
+    let has_host = uri.host().is_some_and(|host| !host.is_empty());
+    (web && has_host).then_some(uri)
 }
 
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::fs;
+    use std::os::unix::ffi::OsStringExt;
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{Config, ConfigError, FinalServerConfig, load, path};
+    use super::{ApiKey, Config, ConfigError, FinalServerConfig, KeyError, load, path};
     use crate::test_support::TempDir;
 
     const MINIMAL: &str = r#"
@@ -151,6 +215,15 @@ mod tests {
                 .find(|(candidate, _)| candidate == name)
                 .map(|(_, value)| value.clone())
         }
+    }
+
+    fn key(text: &str) -> ApiKey {
+        ApiKey::parse(text.as_bytes()).unwrap()
+    }
+
+    fn with_key_file(dir: &TempDir, key_file: &str, contents: &[u8]) -> PathBuf {
+        fs::write(dir.path().join(key_file), contents).unwrap();
+        write_config(dir, &format!("{MINIMAL}api_key_file = {key_file:?}\n"))
     }
 
     fn write_config(dir: &TempDir, text: &str) -> PathBuf {
@@ -221,7 +294,9 @@ mod tests {
             config,
             Config {
                 final_server: FinalServerConfig {
-                    endpoint: "http://127.0.0.1:8000/v1/audio/transcriptions".to_owned(),
+                    endpoint: "http://127.0.0.1:8000/v1/audio/transcriptions"
+                        .parse()
+                        .unwrap(),
                     model: "whisper-large-v3".to_owned(),
                     api_key: None,
                 },
@@ -262,7 +337,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.final_server.api_key.as_deref(), Some("env-key"));
+        assert_eq!(config.final_server.api_key, Some(key("env-key")));
     }
 
     #[test]
@@ -281,7 +356,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(config.final_server.api_key.as_deref(), Some("file-key"));
+        assert_eq!(config.final_server.api_key, Some(key("file-key")));
     }
 
     #[test]
@@ -299,6 +374,145 @@ mod tests {
         assert!(
             error.to_string().contains(key_path.to_str().unwrap()),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_key_variable_means_no_key() {
+        let dir = TempDir::new();
+        let config_path = write_config(&dir, MINIMAL);
+
+        let config = load(&config_path, &env(&[("COPPER_DICTATE_FINAL_API_KEY", "")])).unwrap();
+
+        assert_eq!(config.final_server.api_key, None);
+    }
+
+    #[test]
+    fn a_key_variable_that_is_not_utf8_stops_the_start_and_names_the_variable() {
+        let dir = TempDir::new();
+        let config_path = write_config(&dir, MINIMAL);
+        let env = |name: &str| {
+            (name == "COPPER_DICTATE_FINAL_API_KEY")
+                .then(|| OsString::from_vec(vec![b's', b'k', 0xff]))
+        };
+
+        let error = load(&config_path, &env).unwrap_err();
+
+        assert!(
+            matches!(error, ConfigError::KeyVariable(KeyError::Invalid)),
+            "{error:?}"
+        );
+        assert!(
+            error.to_string().starts_with(
+                "the environment variable COPPER_DICTATE_FINAL_API_KEY holds no valid key"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_key_file_stops_the_start_and_names_the_file() {
+        let dir = TempDir::new();
+        let config_path = with_key_file(&dir, "final.key", b" \n");
+
+        let error = load(&config_path, &env(&[])).unwrap_err();
+
+        let key_path = dir.path().join("final.key");
+        assert!(
+            matches!(&error, ConfigError::KeyFile { path, problem: KeyError::Empty, .. } if *path == key_path),
+            "{error:?}"
+        );
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "the API key file {} (api_key_file in {}) is empty",
+                key_path.display(),
+                config_path.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_key_file_with_more_than_one_line_is_refused() {
+        let dir = TempDir::new();
+        let config_path = with_key_file(&dir, "final.key", b"sk-one\nsk-two\n");
+
+        let error = load(&config_path, &env(&[])).unwrap_err();
+
+        assert!(
+            matches!(
+                error,
+                ConfigError::KeyFile {
+                    problem: KeyError::Invalid,
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_relative_key_file_is_read_from_the_configuration_files_directory() {
+        let dir = TempDir::new();
+        let config_path = with_key_file(&dir, "final.key", b"sk-beside\n");
+
+        let config = load(&config_path, &env(&[])).unwrap();
+
+        assert_eq!(config.final_server.api_key, Some(key("sk-beside")));
+    }
+
+    #[test]
+    fn the_key_stays_out_of_debug_output() {
+        let dir = TempDir::new();
+        let config_path = write_config(&dir, MINIMAL);
+
+        let config = load(
+            &config_path,
+            &env(&[("COPPER_DICTATE_FINAL_API_KEY", "sk-secret")]),
+        )
+        .unwrap();
+
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("sk-secret"), "{debug}");
+    }
+
+    #[test]
+    fn the_endpoint_must_be_an_http_or_https_url_with_a_host() {
+        let dir = TempDir::new();
+        for endpoint in [
+            "whisper.lan:8000/v1/audio/transcriptions",
+            "ftp://whisper.lan/v1/audio/transcriptions",
+            "http:///v1/audio/transcriptions",
+            "http://:8000/v1/audio/transcriptions",
+            "not a url",
+        ] {
+            let config_path = write_config(
+                &dir,
+                &format!("[final]\nendpoint = {endpoint:?}\nmodel = \"m\"\n"),
+            );
+
+            let message = invalid_message(load(&config_path, &env(&[])), &config_path);
+
+            assert!(
+                message.starts_with("endpoint in [final] must be an http or https URL"),
+                "{endpoint}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_https_endpoint_is_accepted() {
+        let dir = TempDir::new();
+        let config_path = write_config(
+            &dir,
+            "[final]\nendpoint = \"https://whisper.lan/v1/audio/transcriptions\"\nmodel = \"m\"\n",
+        );
+
+        let config = load(&config_path, &env(&[])).unwrap();
+
+        assert_eq!(
+            config.final_server.endpoint,
+            "https://whisper.lan/v1/audio/transcriptions"
         );
     }
 

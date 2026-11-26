@@ -99,7 +99,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use super::{BindError, bind, serve, socket_path};
-    use crate::config::FinalServerConfig;
+    use crate::config::{ApiKey, FinalServerConfig};
     use crate::final_server::HttpFinalServer;
     use crate::session::Session;
     use crate::test_support::{FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode};
@@ -139,9 +139,9 @@ mod tests {
 
     fn http_final_server(url: &str) -> HttpFinalServer {
         HttpFinalServer::new(FinalServerConfig {
-            endpoint: url.to_owned(),
+            endpoint: url.parse().unwrap(),
             model: "whisper-large-v3".to_owned(),
-            api_key: Some("sk-test".to_owned()),
+            api_key: ApiKey::parse(b"sk-test").ok(),
         })
     }
 

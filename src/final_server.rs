@@ -86,10 +86,10 @@ impl FinalServer for HttpFinalServer {
         let (content_type, body) = multipart(&self.config.model, &wav);
         let mut request = self
             .agent
-            .post(&self.config.endpoint)
+            .post(self.config.endpoint.clone())
             .header("Content-Type", content_type);
         if let Some(key) = &self.config.api_key {
-            request = request.header("Authorization", format!("Bearer {key}"));
+            request = request.header("Authorization", key.bearer());
         }
         let mut response = request.send(&body[..])?;
         let status = response.status();
@@ -166,7 +166,7 @@ mod tests {
     use std::time::Duration;
 
     use super::{HttpFinalServer, TIMEOUTS, Timeouts, boundary_absent_from};
-    use crate::config::{self, FinalServerConfig};
+    use crate::config::{self, ApiKey, FinalServerConfig};
     use crate::session::{BoxError, FinalServer, Recording};
     use crate::test_support::{
         Decoded, FakeHttpServer, HttpAnswer, Part, TempDir, decode, read_request,
@@ -176,16 +176,16 @@ mod tests {
 
     fn server(url: &str, api_key: Option<&str>) -> HttpFinalServer {
         HttpFinalServer::new(FinalServerConfig {
-            endpoint: url.to_owned(),
+            endpoint: url.parse().unwrap(),
             model: "whisper-large-v3".to_owned(),
-            api_key: api_key.map(str::to_owned),
+            api_key: api_key.map(|key| ApiKey::parse(key.as_bytes()).unwrap()),
         })
     }
 
     fn with_timeouts(url: &str, timeouts: &Timeouts) -> HttpFinalServer {
         HttpFinalServer::with_timeouts(
             FinalServerConfig {
-                endpoint: url.to_owned(),
+                endpoint: url.parse().unwrap(),
                 model: "whisper-large-v3".to_owned(),
                 api_key: None,
             },

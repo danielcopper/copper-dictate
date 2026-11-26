@@ -31,9 +31,10 @@ Self-hosted live dictation for Linux desktops: live preview while you speak, an 
 - **A client daemon in Rust** on your desktop, recording from the default microphone (ALSA, so it needs `libasound` —
   every Linux desktop has it)
 - **Accurate final text** — when you stop, the whole recording goes once to a self-hosted OpenAI-compatible
-  transcription server (`/v1/audio/transcriptions`) as 16 kHz mono WAV, with automatic language detection
+  transcription server (`/v1/audio/transcriptions`) as 16 kHz mono WAV, with automatic language detection unless the
+  server has a default language of its own
 - **Nothing but the dictation leaves your machine** — no telemetry, no connection but the configured endpoint (proxy
-  variables are ignored), and the recording is dropped once its text is back
+  variables are ignored, redirects are not followed), and the recording is dropped once its text is back
 
 ## Planned
 
@@ -55,8 +56,11 @@ model = "primeline/whisper-large-v3-turbo-german"
 max_seconds = 900 # a recording stops by itself after this long; 15 minutes when left out
 ```
 
-The API key never goes into this file. It is read from the file `api_key_file` names, or, without that line, from the
-environment variable `COPPER_DICTATE_FINAL_API_KEY`; with neither, the request carries no key.
+The endpoint is the full URL, `http` or `https`. The API key never goes into this file. It is read from the file
+`api_key_file` names (a relative path counts from the configuration file's directory), or, without that line, from the
+environment variable `COPPER_DICTATE_FINAL_API_KEY`; with neither, or with the variable empty, the request carries no
+key. A key file that is empty, or a key with spaces, line breaks or characters outside visible ASCII, stops the daemon
+at start.
 
 ```sh
 copper-dictate daemon   # keep it running; it stops at once, naming the path and the field, if the configuration is incomplete
