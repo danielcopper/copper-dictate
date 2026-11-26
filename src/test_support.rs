@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use std::{fs, process};
 
+use crate::config::{ApiKey, FinalServerConfig};
 use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording, Stopped};
 
 pub(crate) struct TempDir(PathBuf);
@@ -280,6 +281,14 @@ pub(crate) struct BrokenMicrophone;
 impl AudioSource for BrokenMicrophone {
     fn start(&self) -> Result<Box<dyn Capture>, BoxError> {
         Err("no input device".into())
+    }
+}
+
+pub(crate) fn final_server_config(url: &str, api_key: Option<&str>) -> FinalServerConfig {
+    FinalServerConfig {
+        endpoint: url.parse().unwrap(),
+        model: "whisper-large-v3".to_owned(),
+        api_key: api_key.map(|key| ApiKey::parse(key.as_bytes()).unwrap()),
     }
 }
 

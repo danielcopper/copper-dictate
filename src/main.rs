@@ -90,20 +90,16 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{Cli, session};
-    use crate::config::{Config, FinalServerConfig};
+    use crate::config::Config;
     use crate::session::Outcome;
-    use crate::test_support::{FakeHttpServer, FakeMicrophone};
+    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config};
 
     #[test]
     fn the_daemons_session_stops_at_the_configured_limit_and_sends_to_the_configured_endpoint() {
         let fake = FakeHttpServer::start(vec![(200, r#"{"text":"at the limit"}"#.to_owned())]);
         let (microphone, _events) = FakeMicrophone::new(vec![1; 160]);
         let config = Config {
-            final_server: FinalServerConfig {
-                endpoint: fake.url.parse().unwrap(),
-                model: "whisper-large-v3".to_owned(),
-                api_key: None,
-            },
+            final_server: final_server_config(&fake.url, None),
             max_recording: Duration::from_millis(300),
         };
         let session = session(config, Box::new(microphone));

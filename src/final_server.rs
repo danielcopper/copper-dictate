@@ -197,31 +197,21 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{HttpFinalServer, TIMEOUTS, Timeouts, answer_minutes, boundary_absent_from};
-    use crate::config::{self, ApiKey, FinalServerConfig};
+    use crate::config;
     use crate::session::{BoxError, FinalServer, Recording};
     use crate::test_support::{
-        Decoded, FakeHttpServer, HttpAnswer, Part, TempDir, decode, read_request,
+        Decoded, FakeHttpServer, HttpAnswer, Part, TempDir, decode, final_server_config,
+        read_request,
     };
 
     const SHORT: Duration = Duration::from_millis(300);
 
     fn server(url: &str, api_key: Option<&str>) -> HttpFinalServer {
-        HttpFinalServer::new(FinalServerConfig {
-            endpoint: url.parse().unwrap(),
-            model: "whisper-large-v3".to_owned(),
-            api_key: api_key.map(|key| ApiKey::parse(key.as_bytes()).unwrap()),
-        })
+        HttpFinalServer::new(final_server_config(url, api_key))
     }
 
     fn with_timeouts(url: &str, timeouts: &Timeouts) -> HttpFinalServer {
-        HttpFinalServer::with_timeouts(
-            FinalServerConfig {
-                endpoint: url.parse().unwrap(),
-                model: "whisper-large-v3".to_owned(),
-                api_key: None,
-            },
-            timeouts,
-        )
+        HttpFinalServer::with_timeouts(final_server_config(url, None), timeouts)
     }
 
     fn short_silence() -> Recording {
