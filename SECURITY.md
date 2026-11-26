@@ -26,6 +26,14 @@ You should receive a response within 7 days.
 
 ## Scope
 
-Today copper-dictate is a scaffold: a binary that prints its version and handles no data. Once the planned client
-exists, it will handle audio from your microphone and send it to the transcription servers you configure; this section
-will then say what it stores, where, and what it sends.
+copper-dictate runs as a daemon under your user and records from the default microphone only between two `toggle` calls.
+
+- **Audio** stays in memory for the current dictation only and is never written to disk. When the recording stops, it is
+  sent once, as 16 kHz mono WAV, to the transcription endpoint in your configuration, and dropped once the answer is
+  back.
+- **Connections** go to that endpoint only: proxy variables are ignored, redirects are not followed, and there is no
+  telemetry. With an `http://` endpoint, the audio and the key travel unencrypted.
+- **The API key** is read from the file `api_key_file` names or from `COPPER_DICTATE_FINAL_API_KEY`, never from
+  `config.toml`, and is sent only as the `Authorization` header of that request.
+- **The socket** between `toggle` and the daemon lies in `$XDG_RUNTIME_DIR/copper-dictate/`, a directory only your user
+  can open. The final text goes to the `toggle` that asked for it; the daemon keeps it only until a `toggle` takes it.
