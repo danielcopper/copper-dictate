@@ -8,6 +8,7 @@ use cpal::{
 };
 
 use crate::audio::resample::Resampler;
+use crate::log;
 use crate::session::{AudioSource, BoxError, Capture, Recording, Stopped};
 
 /// The default input device of the default audio host (ALSA on Linux).
@@ -43,14 +44,14 @@ impl Captured {
         match error.kind() {
             // cpal recovers from these on its own and keeps delivering audio.
             ErrorKind::Xrun | ErrorKind::DeviceChanged => {
-                eprintln!("copper-dictate: the microphone reported a glitch: {error}");
+                log::eprint(format_args!("the microphone reported a glitch: {error}"));
                 self.glitches = self.glitches.saturating_add(1);
             }
             // cpal: "Audio will still play", only without real-time scheduling.
             ErrorKind::RealtimeDenied => {
-                eprintln!(
-                    "copper-dictate: the microphone records without real-time priority: {error}"
-                );
+                log::eprint(format_args!(
+                    "the microphone records without real-time priority: {error}"
+                ));
             }
             _ => {
                 if self.failure.is_none() {
@@ -101,10 +102,10 @@ impl AudioSource for Microphone {
             }
         }?;
         stream.play()?;
-        eprintln!(
-            "copper-dictate: the microphone records at {}",
+        log::eprint(format_args!(
+            "the microphone records at {}",
             describe(&config)
-        );
+        ));
         Ok(Box::new(MicrophoneCapture { stream, captured }))
     }
 }

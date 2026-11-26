@@ -13,6 +13,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
+use crate::log;
 use crate::session::{Outcome, Session};
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
@@ -63,12 +64,12 @@ fn serve_connections(
                 let session = Arc::clone(session);
                 thread::spawn(move || {
                     if let Err(error) = handle(&connection, &session) {
-                        eprintln!("copper-dictate: a toggle's connection failed: {error}");
+                        log::eprint(format_args!("a toggle's connection failed: {error}"));
                     }
                 });
             }
             Err(error) => {
-                eprintln!("copper-dictate: cannot accept a toggle's connection: {error}");
+                log::eprint(format_args!("cannot accept a toggle's connection: {error}"));
                 // Errors such as running out of file descriptors last a while; the pause keeps
                 // the loop from spinning through them.
                 thread::sleep(ACCEPT_RETRY);
@@ -108,12 +109,12 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
         return Err(error);
     };
     if session.keep(transcript) {
-        eprintln!(
-            "copper-dictate: the toggle went away before its final text or failure arrived; the next toggle prints it"
+        log::eprint(
+            "the toggle went away before its final text or failure arrived; the next toggle prints it",
         );
     } else {
-        eprintln!(
-            "copper-dictate: the toggle went away before its final text or failure arrived, and a new dictation has begun; it is lost"
+        log::eprint(
+            "the toggle went away before its final text or failure arrived, and a new dictation has begun; it is lost",
         );
     }
     Ok(())

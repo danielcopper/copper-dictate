@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
+use crate::log;
 
 #[derive(Debug, Error)]
 enum ToggleError {
@@ -28,20 +29,20 @@ pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bo
                 true
             }
             Err(error) => {
-                let _ = writeln!(err, "copper-dictate: cannot print the final text: {error}");
+                let _ = log::write(err, format_args!("cannot print the final text: {error}"));
                 false
             }
         },
         Ok(Reply::Recording) => {
-            let _ = writeln!(err, "copper-dictate: recording; toggle again to stop");
+            let _ = log::write(err, "recording; toggle again to stop");
             true
         }
         Ok(Reply::Error { message }) => {
-            let _ = writeln!(err, "copper-dictate: {message}");
+            let _ = log::write(err, message);
             false
         }
         Err(error) => {
-            let _ = writeln!(err, "copper-dictate: {error}");
+            let _ = log::write(err, error);
             false
         }
     }
@@ -53,9 +54,11 @@ fn warn_of_glitches(glitches: u32, err: &mut dyn Write) {
         1 => "once".to_owned(),
         n => format!("{n} times"),
     };
-    let _ = writeln!(
+    let _ = log::write(
         err,
-        "copper-dictate: warning: the microphone glitched {times} during the recording; parts of the audio may be missing"
+        format_args!(
+            "warning: the microphone glitched {times} during the recording; parts of the audio may be missing"
+        ),
     );
 }
 

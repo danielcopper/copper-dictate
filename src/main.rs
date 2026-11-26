@@ -1,6 +1,7 @@
 mod audio;
 mod config;
 mod daemon;
+mod log;
 mod servers;
 mod session;
 #[cfg(test)]
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
         Command::Daemon => match run_daemon(&env) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("copper-dictate: {error}");
+                log::eprint(error);
                 false
             }
         },
@@ -52,7 +53,7 @@ fn main() -> ExitCode {
                 daemon::toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock())
             }
             Err(error) => {
-                eprintln!("copper-dictate: {error}");
+                log::eprint(error);
                 false
             }
         },
@@ -69,7 +70,7 @@ fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
     let session = session(config, Box::new(Microphone));
-    eprintln!("copper-dictate: listening at {}", socket.display());
+    log::eprint(format_args!("listening at {}", socket.display()));
     daemon::serve(&listener, &session);
     Ok(())
 }
@@ -84,8 +85,6 @@ fn session(config: Config, audio: Box<dyn AudioSource>) -> Arc<Session> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::Path;
     use std::time::Duration;
 
     use clap::CommandFactory;
@@ -93,7 +92,7 @@ mod tests {
     use super::{Cli, session};
     use crate::config::Config;
     use crate::session::Outcome;
-    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config};
+    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config, source_files};
 
     #[test]
     fn the_daemons_session_stops_at_the_configured_limit_and_sends_to_the_configured_endpoint() {
@@ -111,23 +110,9 @@ mod tests {
         assert_eq!(request.path, "/v1/audio/transcriptions");
     }
 
-    fn rust_files(dir: &Path, base: &Path, files: &mut Vec<String>) {
-        for entry in fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                rust_files(&path, base, files);
-            } else if path.extension().is_some_and(|extension| extension == "rs") {
-                files.push(path.strip_prefix(base).unwrap().display().to_string());
-            }
-        }
-    }
-
     #[test]
     fn every_module_sits_in_the_directory_of_its_role() {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        rust_files(&src, &src, &mut files);
-        files.sort();
+        let files: Vec<String> = source_files().into_keys().collect();
 
         assert_eq!(
             files,
@@ -139,6 +124,7 @@ mod tests {
                 "daemon.rs",
                 "daemon/protocol.rs",
                 "daemon/toggle.rs",
+                "log.rs",
                 "main.rs",
                 "servers.rs",
                 "servers/final_server.rs",
