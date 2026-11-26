@@ -7,12 +7,20 @@ name: SonarCloud fork PRs
 # SonarSource's pattern for pull requests from forks:
 # https://docs.sonarsource.com/sonarqube-cloud/analyzing-source-code/ci-based-analysis/github-actions-for-sonarcloud
 #
-# Nothing the fork wrote is executed here — no install, build, test, script or
-# action from its checkout. A value taken from its run (the PR number, the
-# branch name) reaches a shell only through `env:` and becomes a scanner
-# argument only after a regex check — the branch name once its other characters
-# are replaced; its tree and the two reports reach the scanner as the data it
-# analyses.
+# No install, build, test, script or action from the fork's checkout is run
+# here. A value taken from its run (the PR number, the branch name) reaches a
+# shell only through `env:` and becomes a scanner argument only after a regex
+# check — the branch name once its other characters are replaced; its tree and
+# the two reports reach the scanner as the data it analyses.
+#
+# What the scan can still execute: the Rust analyzer may call cargo on the
+# fork's Cargo.toml and Cargo.lock, and Sonar does not document which cargo
+# commands it runs. That cargo is main's pinned toolchain (RUSTUP_TOOLCHAIN,
+# which rustup prefers over any toolchain file), offline, with every
+# rust-toolchain file and .cargo directory of the fork deleted, so neither a
+# toolchain the fork names nor a cargo configuration such as
+# `build.rustc-wrapper` runs. Should the analyzer ever build the crate, the
+# fork's build scripts and proc macros would run beside SONAR_TOKEN.
 
 on:
   workflow_run:
@@ -142,16 +150,30 @@ jobs:
       # - .scannerwork, the scanner's working directory, and the report paths:
       #   removed, so nothing the fork planted there is read or written
       #   through. The reports land where the `sonarcloud` job in ci.yml puts
-      #   them, which is what the report paths in sonar-project.properties name.
+      #   them, which is what the report paths in sonar-project.properties name;
+      # - rust-toolchain, rust-toolchain.toml and .cargo, wherever they sit: a
+      #   toolchain file can name any directory as the toolchain (`path`), and a
+      #   cargo configuration can put any program in front of rustc. Main's
+      #   rust-toolchain.toml takes their place, and its channel is installed
+      #   from outside the tree for the scan to run cargo with.
       - name: Replace the fork's scanner inputs
+        id: inputs
         if: steps.pr.outputs.scan == 'true'
         env:
           ARTIFACTS: ${{ runner.temp }}/ci-artifacts
         run: |
           set -euo pipefail
           find . -path ./.git -prune -o -type l -print0 | xargs -0 -r rm -f --
+          find . -path ./.git -prune -o \( -name rust-toolchain -o -name rust-toolchain.toml -o -name .cargo \) -print0 \
+            | xargs -0 -r rm -rf --
           rm -rf -- sonar-project.properties .scannerwork lcov.info clippy-report.json
           git cat-file blob "$GITHUB_SHA:sonar-project.properties" > sonar-project.properties
+          git cat-file blob "$GITHUB_SHA:rust-toolchain.toml" > rust-toolchain.toml
+
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          [[ "$channel" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::No pinned channel in main's rust-toolchain.toml"; exit 1; }
+          (cd "$RUNNER_TEMP" && rustup toolchain install "$channel" --profile minimal --no-self-update)
+          echo "rust-toolchain=$channel" >> "$GITHUB_OUTPUT"
 
           for report in "$ARTIFACTS/coverage-report/lcov.info" "$ARTIFACTS/clippy-report/clippy-report.json"; do
             [[ -f "$report" && ! -L "$report" ]] || { echo "::error::Missing report ${report#"$ARTIFACTS"/}"; exit 1; }
@@ -168,6 +190,8 @@ jobs:
         uses: SonarSource/sonarqube-scan-action@70bad232163b09d998ea0707ee80c0ec80798c16 # v8.5.1
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          RUSTUP_TOOLCHAIN: ${{ steps.inputs.outputs.rust-toolchain }}
+          CARGO_NET_OFFLINE: "true"
         with:
           args: >
             -Dsonar.pullrequest.key=${{ steps.pr.outputs.number }}
