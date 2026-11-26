@@ -140,6 +140,14 @@ jobs:
       - name: Pack it with its notices and check the archive, its checksum and the binary's --version
         run: bash scripts/package.sh build
 
+      - name: Keep the archive, so a device test runs the binary a release would ship
+        uses: actions/upload-artifact@v7
+        with:
+          name: copper-dictate-x86_64-linux
+          path: build/
+          if-no-files-found: error
+          retention-days: 14
+
   markdown-format:
     runs-on: ubuntu-latest
     timeout-minutes: 5
