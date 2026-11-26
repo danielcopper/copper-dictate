@@ -44,8 +44,8 @@ The platform-independent part of the client that runs a dictation: audio and sta
 overlay shows and the text to insert come out. The counterpart of the platform parts.
 
 **Platform part**:\
-A part of the client that depends on the desktop it runs on: the shortcut, the insertion at the cursor and the overlay.
-Each stands behind an interface, so another desktop gets its own without a change to the core.\
+A part of the client that depends on the desktop it runs on, such as the shortcut, the insertion at the cursor and the
+overlay. Each stands behind an interface, so another desktop gets its own without a change to the core.\
 _Avoid_: adapter, integration, plugin
 
 **Overlay**:\
