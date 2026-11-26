@@ -69,7 +69,8 @@ copper-dictate toggle   # stop it; prints the final text
 ```
 
 `toggle` talks to the daemon over `$XDG_RUNTIME_DIR/copper-dictate/daemon.sock`. A recording that reaches `max_seconds`
-stops and is transcribed by itself; the next `toggle` prints its text instead of starting a new recording.
+stops and is transcribed by itself; the next `toggle` prints its text instead of starting a new recording. The same
+holds for a text whose `toggle` was interrupted before it arrived.
 
 ## Development
 
