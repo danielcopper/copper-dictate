@@ -1,0 +1,30 @@
+# Build output
+/target
+
+# Sonar inputs — `mise run coverage` and the CI sonarcloud job write them
+lcov.info
+clippy-report.json
+
+# Environment
+.env
+.env.*
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Claude Code — everything is local (worktrees, agents, settings.local.json)
+# except the checked-in path-scoped coding rules. Ignoring the contents rather
+# than the directory itself is what makes the negation below reachable: git does
+# not descend into an ignored directory.
+.claude/*
+!.claude/rules/
+
+# Git worktrees
+.worktrees/
+deno.lock
