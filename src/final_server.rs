@@ -111,10 +111,13 @@ fn boundary_absent_from(data: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::fs;
+
     use super::{HttpFinalServer, boundary_absent_from};
-    use crate::config::FinalServerConfig;
+    use crate::config::{self, FinalServerConfig};
     use crate::session::{FinalServer, Recording};
-    use crate::test_support::{FakeHttpServer, Part};
+    use crate::test_support::{FakeHttpServer, Part, TempDir};
     use crate::wav::tests::{Decoded, decode};
 
     fn server(url: &str, api_key: Option<&str>) -> HttpFinalServer {
@@ -165,6 +168,36 @@ mod tests {
                 bits_per_sample: 16,
                 samples,
             }
+        );
+    }
+
+    #[test]
+    fn a_key_from_the_environment_reaches_the_request_when_no_key_file_is_configured() {
+        let fake = FakeHttpServer::start(vec![(200, r#"{"text":"ok"}"#.to_owned())]);
+        let dir = TempDir::new();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            format!(
+                "[final]\nendpoint = {:?}\nmodel = \"whisper-large-v3\"\n",
+                fake.url
+            ),
+        )
+        .unwrap();
+        let env = |name: &str| {
+            (name == "COPPER_DICTATE_FINAL_API_KEY").then(|| OsString::from("sk-from-env"))
+        };
+        let config = config::load(&config_path, &env).unwrap();
+
+        HttpFinalServer::new(config.final_server)
+            .transcribe(&Recording {
+                samples: vec![0; 160],
+            })
+            .unwrap();
+
+        assert_eq!(
+            fake.requests.recv().unwrap().header("authorization"),
+            Some("Bearer sk-from-env")
         );
     }
 
