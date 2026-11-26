@@ -11,7 +11,7 @@
 # with Cargo.toml means the archive would carry a binary of another version.
 set -euo pipefail
 
-if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+if [[ $# -lt 1 ]] || [[ $# -gt 2 ]]; then
     echo "usage: $0 <out-dir> [<tag>]" >&2
     exit 2
 fi
@@ -19,14 +19,14 @@ out=$1
 pkgid=$(cargo pkgid --quiet)
 version=${pkgid##*[#@]}
 tag=${2:-v$version}
-if [ "$tag" != "v$version" ]; then
+if [[ "$tag" != "v$version" ]]; then
     echo "package: tag $tag does not match Cargo.toml's version $version" >&2
     exit 1
 fi
 
 triple=x86_64-unknown-linux-gnu
 binary=target/$triple/release/copper-dictate
-if [ ! -x "$binary" ]; then
+if [[ ! -x "$binary" ]]; then
     echo "package: $binary is missing; build it with cargo build --release --locked --target $triple first" >&2
     exit 1
 fi
@@ -38,7 +38,7 @@ trap 'rm -rf "$stage"' EXIT
 mkdir "$stage/$name"
 cp "$binary" LICENSE README.md "$stage/$name/"
 if ! cargo about generate --locked --fail about.hbs -o "$stage/$name/THIRD-PARTY-NOTICES.txt" ||
-    ! [ -s "$stage/$name/THIRD-PARTY-NOTICES.txt" ]; then
+    ! [[ -s "$stage/$name/THIRD-PARTY-NOTICES.txt" ]]; then
     echo "package: cargo about could not write the third-party notices" >&2
     exit 1
 fi
@@ -49,13 +49,13 @@ tar -C "$stage" --owner=0 --group=0 --numeric-owner -czf "$out/$name.tar.gz" "$n
 mkdir "$stage/unpacked"
 tar -C "$stage/unpacked" -xzf "$out/$name.tar.gz"
 for file in copper-dictate LICENSE README.md THIRD-PARTY-NOTICES.txt; do
-    if ! [ -s "$stage/unpacked/$name/$file" ]; then
+    if ! [[ -s "$stage/unpacked/$name/$file" ]]; then
         echo "package: the archive has no $file" >&2
         exit 1
     fi
 done
 reported=$("$stage/unpacked/$name/copper-dictate" --version)
-if [ "$reported" != "copper-dictate $version" ]; then
+if [[ "$reported" != "copper-dictate $version" ]]; then
     echo "package: the packed binary reports '$reported', expected 'copper-dictate $version'" >&2
     exit 1
 fi
