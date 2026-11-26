@@ -39,22 +39,30 @@ impl Captured {
     }
 
     fn report(&mut self, error: cpal::Error) {
-        // cpal recovers from these on its own and keeps delivering audio.
-        if matches!(
-            error.kind(),
-            ErrorKind::Xrun | ErrorKind::DeviceChanged | ErrorKind::RealtimeDenied
-        ) {
-            eprintln!("copper-dictate: the microphone reported a glitch: {error}");
-            self.glitches = self.glitches.saturating_add(1);
-        } else if self.failure.is_none() {
-            self.failure = Some(error);
+        match error.kind() {
+            // cpal recovers from these on its own and keeps delivering audio.
+            ErrorKind::Xrun | ErrorKind::DeviceChanged => {
+                eprintln!("copper-dictate: the microphone reported a glitch: {error}");
+                self.glitches = self.glitches.saturating_add(1);
+            }
+            // cpal: "Audio will still play", only without real-time scheduling.
+            ErrorKind::RealtimeDenied => {
+                eprintln!(
+                    "copper-dictate: the microphone records without real-time priority: {error}"
+                );
+            }
+            _ => {
+                if self.failure.is_none() {
+                    self.failure = Some(error);
+                }
+            }
         }
     }
 
     fn take(&mut self) -> Result<Stopped, BoxError> {
         match self.failure.take() {
             Some(error) => {
-                Err(format!("the microphone stopped during the recording: {error}").into())
+                Err(format!("the microphone failed during the recording: {error}").into())
             }
             None => Ok(Stopped {
                 recording: Recording {
@@ -151,18 +159,18 @@ mod tests {
     use super::Captured;
 
     #[test]
-    fn a_stream_error_that_ends_the_capture_fails_the_stop() {
+    fn a_stream_error_other_than_a_glitch_fails_the_stop() {
         let mut captured = Captured::new(16_000, 1);
         captured.push([0.5; 160]);
 
-        captured.report(cpal::Error::new(ErrorKind::DeviceNotAvailable));
+        captured.report(cpal::Error::with_message(
+            ErrorKind::BackendError,
+            "snd_pcm_readi failed",
+        ));
 
-        let error = captured.take().unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .starts_with("the microphone stopped during the recording: "),
-            "{error}"
+        assert_eq!(
+            captured.take().unwrap_err().to_string(),
+            "the microphone failed during the recording: snd_pcm_readi failed"
         );
     }
 
@@ -187,6 +195,10 @@ mod tests {
         captured.report(cpal::Error::new(ErrorKind::RealtimeDenied));
         captured.report(cpal::Error::new(ErrorKind::Xrun));
 
-        assert_eq!(captured.take().unwrap().glitches, 4);
+        assert_eq!(
+            captured.take().unwrap().glitches,
+            3,
+            "a refused real-time priority loses no audio and is no glitch"
+        );
     }
 }
