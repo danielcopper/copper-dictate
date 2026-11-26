@@ -19,6 +19,10 @@ impl Sandbox {
     }
 
     fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_copper-dictate"));
         command
             .args(args)
@@ -30,7 +34,7 @@ impl Sandbox {
         if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
             command.env("LLVM_PROFILE_FILE", profile);
         }
-        command.output().unwrap()
+        command
     }
 }
 
@@ -64,6 +68,23 @@ fn toggle_without_a_running_daemon_fails_and_says_so() {
     assert_eq!(output.stdout, b"");
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("the daemon is not running"), "{stderr}");
+}
+
+#[test]
+fn toggle_without_a_runtime_directory_fails_and_says_why() {
+    let sandbox = Sandbox::new("no-runtime");
+
+    let output = sandbox
+        .command(&["toggle"])
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "copper-dictate: XDG_RUNTIME_DIR is not set to an absolute path, so the daemon's socket has no place\n"
+    );
 }
 
 #[test]

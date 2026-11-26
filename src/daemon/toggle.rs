@@ -128,6 +128,20 @@ mod tests {
     }
 
     #[test]
+    fn an_answer_that_is_no_reply_is_reported() {
+        let (_runtime_dir, socket) = daemon_answering(b"not json\n");
+        let mut err = Vec::new();
+
+        assert!(!run(&socket, &mut Vec::new(), &mut err));
+
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with("copper-dictate: the daemon's answer is not understood: "),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn a_final_text_that_cannot_be_printed_is_reported() {
         let (_runtime_dir, socket) = daemon_answering(b"{\"event\":\"text\",\"text\":\"hi\"}\n");
         let mut err = Vec::new();
