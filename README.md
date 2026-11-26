@@ -74,7 +74,9 @@ holds for the text, or the error, of a `toggle` that was interrupted before it a
 stack recovers from (an overrun, a device change) does not end the recording; the `toggle` that prints its text also
 warns on stderr how often the microphone glitched. A refused real-time priority loses no audio and is only logged. Any
 other microphone error fails the dictation. The final server gets twice the recording's length to answer, at least ten
-minutes; a server that takes longer fails the dictation.
+minutes; a server that takes longer fails the dictation. The daemon opens the microphone at 16 kHz where the device
+offers that with a sample format of at least 16 bits, and resamples the device's default configuration otherwise; it
+logs the configuration it opened at the start of each recording.
 
 ## Development
 
