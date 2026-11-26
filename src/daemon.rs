@@ -92,7 +92,14 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     }
     let outcome = match serde_json::from_str::<Request>(&line) {
         Ok(Request::Toggle) => session.toggle(),
-        Err(error) => Outcome::Refused(format!("not a request: {error}")),
+        Err(error) => {
+            return send(
+                connection,
+                &Reply::Error {
+                    message: format!("not a request: {error}"),
+                },
+            );
+        }
     };
     let reply = match &outcome {
         Outcome::Started => Reply::Recording,
@@ -104,10 +111,7 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
             message: message.clone(),
         },
     };
-    let mut answer = serde_json::to_string(&reply)?;
-    answer.push('\n');
-    let mut connection = connection;
-    let Err(error) = connection.write_all(answer.as_bytes()) else {
+    let Err(error) = send(connection, &reply) else {
         return Ok(());
     };
     let Outcome::Done(transcript) = outcome else {
@@ -123,6 +127,12 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
         );
     }
     Ok(())
+}
+
+fn send(mut connection: &UnixStream, reply: &Reply) -> io::Result<()> {
+    let mut answer = serde_json::to_string(reply)?;
+    answer.push('\n');
+    connection.write_all(answer.as_bytes())
 }
 
 #[cfg(test)]
