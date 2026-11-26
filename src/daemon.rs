@@ -2,7 +2,7 @@ pub(crate) mod protocol;
 pub(crate) mod toggle;
 
 use std::fs::{self, DirBuilder};
-use std::io;
+use std::io::{self, BufReader};
 use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -79,7 +79,7 @@ fn serve_connections(
 }
 
 fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
-    let outcome = match read_message::<Request>(connection) {
+    let outcome = match read_message::<Request>(&mut BufReader::new(connection)) {
         Ok(None) => return Ok(()),
         Ok(Some(Request::Toggle)) => session.toggle(),
         Err(ReadError::Io(error)) => return Err(error),

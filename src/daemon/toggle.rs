@@ -1,4 +1,4 @@
-use std::io::{self, Write};
+use std::io::{self, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
@@ -70,7 +70,7 @@ fn send(socket: &Path) -> Result<Reply, ToggleError> {
         _ => ToggleError::Io(error),
     })?;
     write_message(&stream, &Request::Toggle)?;
-    match read_message(&stream) {
+    match read_message(&mut BufReader::new(&stream)) {
         Ok(Some(reply)) => Ok(reply),
         Ok(None) => Err(ToggleError::NoAnswer),
         Err(ReadError::Io(error)) => Err(ToggleError::Io(error)),

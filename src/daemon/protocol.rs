@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
@@ -17,14 +17,14 @@ pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
         .ok_or(NoRuntimeDir)
 }
 
-/// What `toggle` sends the daemon: one JSON object per line.
+/// What `toggle` sends the daemon.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub(crate) enum Request {
     Toggle,
 }
 
-/// The daemon's one-line answer to a request.
+/// The daemon's answer to a request.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum Reply {
@@ -48,9 +48,11 @@ pub(crate) enum ReadError {
 }
 
 /// Reads one message, or `None` when the other side closed the connection without one.
-pub(crate) fn read_message<T: DeserializeOwned>(stream: impl Read) -> Result<Option<T>, ReadError> {
+pub(crate) fn read_message<T: DeserializeOwned>(
+    reader: &mut impl BufRead,
+) -> Result<Option<T>, ReadError> {
     let mut line = String::new();
-    if BufReader::new(stream).read_line(&mut line)? == 0 {
+    if reader.read_line(&mut line)? == 0 {
         return Ok(None);
     }
     Ok(Some(serde_json::from_str(&line)?))
@@ -96,26 +98,29 @@ mod tests {
     }
 
     #[test]
-    fn a_written_message_reads_back_and_ends_the_line() {
+    fn written_messages_read_back_one_at_a_time() {
         let mut stream = Vec::new();
         write_message(&mut stream, &Reply::Recording).unwrap();
-        stream.extend_from_slice(b"{\"event\":\"error\",\"message\":\"the next line\"}\n");
+        let next = Reply::Error {
+            message: "the next line".to_owned(),
+        };
+        write_message(&mut stream, &next).unwrap();
+        let mut reader = stream.as_slice();
 
-        assert_eq!(
-            read_message::<Reply>(stream.as_slice()).unwrap(),
-            Some(Reply::Recording)
-        );
+        assert_eq!(read_message(&mut reader).unwrap(), Some(Reply::Recording));
+        assert_eq!(read_message(&mut reader).unwrap(), Some(next));
+        assert_eq!(read_message::<Reply>(&mut reader).unwrap(), None);
     }
 
     #[test]
     fn a_closed_connection_reads_as_no_message() {
-        assert!(matches!(read_message::<Request>(&b""[..]), Ok(None)));
+        assert!(matches!(read_message::<Request>(&mut &b""[..]), Ok(None)));
     }
 
     #[test]
     fn a_line_that_is_no_message_reads_as_a_json_error() {
         assert!(matches!(
-            read_message::<Request>(&b"{\"command\":\"dance\"}\n"[..]),
+            read_message::<Request>(&mut &b"{\"command\":\"dance\"}\n"[..]),
             Err(ReadError::Json(_))
         ));
     }
