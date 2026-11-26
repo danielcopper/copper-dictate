@@ -5,17 +5,15 @@ use crate::wav::SAMPLE_RATE;
 /// Turns a microphone's interleaved samples, at any rate and channel count, into
 /// 16 kHz mono, one chunk at a time.
 ///
-/// Downsampling averages the input over each output sample's span, which also
-/// filters out most of what lies above the new Nyquist frequency; upsampling
-/// interpolates linearly.
+/// Each output sample is the average of the input over its span, which also
+/// filters out most of what lies above the new Nyquist frequency when
+/// downsampling, and repeats input samples when upsampling.
 pub(crate) struct Resampler {
     channels: u16,
     step: f64,
     frame: Vec<f64>,
     sum: f64,
     filled: f64,
-    previous: Option<f64>,
-    position: f64,
 }
 
 impl Resampler {
@@ -27,8 +25,6 @@ impl Resampler {
             frame: Vec::with_capacity(usize::from(channels)),
             sum: 0.0,
             filled: 0.0,
-            previous: None,
-            position: 0.0,
         }
     }
 
@@ -38,11 +34,7 @@ impl Resampler {
             if self.frame.len() == usize::from(self.channels) {
                 let mono = self.frame.iter().sum::<f64>() / f64::from(self.channels);
                 self.frame.clear();
-                if self.step >= 1.0 {
-                    self.average(mono, out);
-                } else {
-                    self.interpolate(mono, out);
-                }
+                self.average(mono, out);
             }
         }
     }
@@ -59,21 +51,10 @@ impl Resampler {
         self.sum += sample * weight;
         self.filled += weight;
     }
-
-    fn interpolate(&mut self, sample: f64, out: &mut Vec<i16>) {
-        let Some(previous) = self.previous.replace(sample) else {
-            return;
-        };
-        while self.position < 1.0 {
-            out.push(to_i16(previous + (sample - previous) * self.position));
-            self.position += self.step;
-        }
-        self.position -= 1.0;
-    }
 }
 
 fn to_i16(sample: f64) -> i16 {
-    sample.clamp(-1.0, 1.0).to_sample()
+    sample.to_sample()
 }
 
 #[cfg(test)]
@@ -145,11 +126,7 @@ mod tests {
     fn upsamples_8_khz_to_16_khz() {
         let out = resample_in_chunks(8_000, 1, &tone(440.0, 8_000, 16_000, 1));
 
-        assert!(
-            (31_998..=32_000).contains(&out.len()),
-            "{} samples",
-            out.len()
-        );
+        assert_eq!(out.len(), 32_000);
         assert!((879..=881).contains(&rising_zero_crossings(&out)));
     }
 
@@ -161,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn clamps_samples_outside_full_scale() {
+    fn samples_beyond_full_scale_saturate() {
         let out = resample_in_chunks(16_000, 1, &[2.0, -2.0]);
 
         assert_eq!(out, [i16::MAX, i16::MIN]);
