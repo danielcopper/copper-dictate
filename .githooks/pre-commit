@@ -19,6 +19,21 @@ if [ -n "${global_hooks:-}" ] && [ -x "$global_hooks/pre-commit" ] &&
     "$global_hooks/pre-commit" || exit 1
 fi
 
+# staged_regular_files <pathspec>...: print, NUL-separated, the staged added,
+# copied, modified and renamed paths whose index entry is a regular file. A
+# symlink (120000) or a submodule (160000) is never formatted: its blob is not
+# file content, and writing a result back would go through the link.
+staged_regular_files() {
+    local meta path
+    local -a fields
+    while IFS= read -r -d '' meta; do
+        read -r -a fields <<< "$meta"
+        IFS= read -r -d '' path
+        case ${fields[4]} in R* | C*) IFS= read -r -d '' path ;; esac
+        case ${fields[1]} in 100644 | 100755) printf '%s\0' "$path" ;; esac
+    done < <(git diff --cached -z --raw --diff-filter=ACMR -- "$@")
+}
+
 # format_staged <formatter> <file>...: run <formatter>, a filter from stdin to
 # stdout, over what is staged of each file, and stop the commit if it fails.
 #
@@ -32,16 +47,21 @@ fi
 # the author deliberately kept out of the index, and nothing anywhere would say
 # so. Such a file is named instead and left alone, index and worktree: what is
 # committed is exactly what was staged — possibly unformatted, which CI will say
-# out loud.
+# out loud. So is a worktree path that is not a regular file reached without a
+# symlink, since writing to it would land somewhere else.
+#
+# The blob is read at stage 0 explicitly: `:<path>` would read `:0:y.rs` as
+# stage 0 of y.rs.
 format_staged() {
-    local formatter="$1" file listed staged formatted
+    local formatter="$1" file listed staged formatted top
     local -a dirty
     shift
+    top=$(pwd -P)
     mapfile -d '' -t dirty < <(git --literal-pathspecs diff -z --name-only -- "$@")
     staged=$(mktemp)
     formatted=$(mktemp)
     for file in "$@"; do
-        if ! git show ":$file" > "$staged"; then
+        if ! git cat-file blob ":0:$file" > "$staged"; then
             echo "pre-commit: cannot read the staged $file" >&2
             rm -f "$staged" "$formatted"
             return 1
@@ -58,6 +78,10 @@ format_staged() {
                 continue 2
             fi
         done
+        if [ -L "$file" ] || ! [ -f "$file" ] || [ "$(realpath -- "$file")" != "$top/$file" ]; then
+            echo "pre-commit: $file is not a regular file in the worktree — leaving it exactly as you staged it, unformatted"
+            continue
+        fi
         if ! cat "$formatted" > "$file" || ! git --literal-pathspecs add -- "$file"; then
             echo "pre-commit: cannot write back and stage the formatted $file" >&2
             rm -f "$staged" "$formatted"
@@ -77,7 +101,7 @@ fi
 if [ -z "$RUSTFMT" ]; then
     echo "pre-commit: rustfmt not found (run 'mise run setup'), skipping Rust format"
 else
-    mapfile -d '' -t STAGED_RS < <(git diff --cached -z --name-only --diff-filter=ACMR -- '*.rs')
+    mapfile -d '' -t STAGED_RS < <(staged_regular_files '*.rs')
     if [ "${#STAGED_RS[@]}" -gt 0 ]; then
         EDITION=$(sed -n 's/^edition = "\(.*\)"$/\1/p' "$(git rev-parse --show-toplevel)/Cargo.toml")
         if [ -z "$EDITION" ]; then
@@ -99,7 +123,7 @@ if [ -z "$DENO" ]; then
 else
     # Minus the paths deno.json excludes: formatting from stdin skips its
     # include and exclude lists.
-    mapfile -d '' -t STAGED_MD < <(git diff --cached -z --name-only --diff-filter=ACMR -- '*.md' \
+    mapfile -d '' -t STAGED_MD < <(staged_regular_files '*.md' \
         | grep -z -vE '^(CHANGELOG\.md$|target/|build/|\.claude/worktrees/|\.worktrees/)')
     if [ "${#STAGED_MD[@]}" -gt 0 ]; then
         format_markdown() { "$DENO" fmt --ext md -; }
