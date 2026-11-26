@@ -49,27 +49,7 @@ pub(crate) enum Outcome {
     Started,
     /// The toggle changed nothing: no recording started, or a transcription still runs.
     Refused(String),
-    Text(FinalText),
-    Failed(String),
-}
-
-impl Outcome {
-    pub(crate) fn into_transcript(self) -> Option<Transcript> {
-        match self {
-            Self::Text(text) => Some(Ok(text)),
-            Self::Failed(message) => Some(Err(message)),
-            Self::Started | Self::Refused(_) => None,
-        }
-    }
-}
-
-impl From<Transcript> for Outcome {
-    fn from(transcript: Transcript) -> Self {
-        match transcript {
-            Ok(text) => Self::Text(text),
-            Err(message) => Self::Failed(message),
-        }
-    }
+    Done(Transcript),
 }
 
 enum State {
@@ -130,17 +110,17 @@ impl Session {
                 self.changed.notify_all();
                 let transcript = self.finish(capture);
                 self.set(State::Idle);
-                transcript.into()
+                Outcome::Done(transcript)
             }
             State::AtLimit { waiter: false } => {
                 shared.state = State::AtLimit { waiter: true };
-                self.wait_for_transcript(shared).into()
+                Outcome::Done(self.wait_for_transcript(shared))
             }
             busy @ (State::Stopping | State::AtLimit { waiter: true }) => {
                 shared.state = busy;
                 Outcome::Refused("a transcription is already in progress".to_owned())
             }
-            State::Finished(transcript) => transcript.into(),
+            State::Finished(transcript) => Outcome::Done(transcript),
         }
     }
 
@@ -261,7 +241,11 @@ mod tests {
     }
 
     fn text(text: &str) -> Outcome {
-        Outcome::Text(final_text(text))
+        Outcome::Done(Ok(final_text(text)))
+    }
+
+    fn failed(message: &str) -> Outcome {
+        Outcome::Done(Err(message.to_owned()))
     }
 
     #[test]
@@ -380,7 +364,7 @@ mod tests {
         session.toggle();
         assert_eq!(
             session.toggle(),
-            Outcome::Failed("the final server failed: connection refused".to_owned())
+            failed("the final server failed: connection refused")
         );
         assert_eq!(session.toggle(), Outcome::Started);
         assert_eq!(session.toggle(), text("again"));
@@ -434,7 +418,7 @@ mod tests {
 
         assert_eq!(
             session.toggle(),
-            Outcome::Failed("the microphone delivered no audio, so nothing was sent".to_owned())
+            failed("the microphone delivered no audio, so nothing was sent")
         );
         assert!(received.lock().unwrap().is_empty());
     }
@@ -451,7 +435,7 @@ mod tests {
 
         assert_eq!(
             session.toggle(),
-            Outcome::Failed("the recording failed: the device is gone".to_owned())
+            failed("the recording failed: the device is gone")
         );
     }
 
@@ -465,10 +449,10 @@ mod tests {
 
         assert_eq!(
             session.toggle(),
-            Outcome::Text(FinalText {
+            Outcome::Done(Ok(FinalText {
                 text: "glitchy".to_owned(),
                 glitches: 5,
-            })
+            }))
         );
     }
 
@@ -478,9 +462,11 @@ mod tests {
         let final_server = FakeFinalServer::answering(&[Ok("undelivered")]);
         let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         session.toggle();
-        let outcome = session.toggle();
+        let Outcome::Done(transcript) = session.toggle() else {
+            panic!("the stop ends the dictation");
+        };
 
-        assert!(session.keep(outcome.into_transcript().unwrap()));
+        assert!(session.keep(transcript));
 
         assert_eq!(session.toggle(), text("undelivered"));
         assert_eq!(events.try_iter().collect::<Vec<_>>(), ["start", "stop"]);

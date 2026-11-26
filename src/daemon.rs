@@ -96,11 +96,11 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     };
     let reply = match &outcome {
         Outcome::Started => Reply::Recording,
-        Outcome::Text(final_text) => Reply::Text {
+        Outcome::Done(Ok(final_text)) => Reply::Text {
             text: final_text.text.clone(),
             glitches: final_text.glitches,
         },
-        Outcome::Refused(message) | Outcome::Failed(message) => Reply::Error {
+        Outcome::Refused(message) | Outcome::Done(Err(message)) => Reply::Error {
             message: message.clone(),
         },
     };
@@ -110,7 +110,7 @@ fn handle(connection: &UnixStream, session: &Arc<Session>) -> io::Result<()> {
     let Err(error) = connection.write_all(answer.as_bytes()) else {
         return Ok(());
     };
-    let Some(transcript) = outcome.into_transcript() else {
+    let Outcome::Done(transcript) = outcome else {
         return Err(error);
     };
     if session.keep(transcript) {
