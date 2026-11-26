@@ -40,7 +40,7 @@ deno.
 
 ```sh
 mise run setup   # install the toolchain, the cargo tools and deno, enable the repository's git hooks
-mise run gate    # every job in ci.yml but the Sonar scan
+mise run gate    # the CI checks, run locally
 ```
 
 ## License

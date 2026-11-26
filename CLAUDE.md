@@ -26,18 +26,17 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
 - **Setup** `mise run setup` (the toolchain from `rust-toolchain.toml`, the cargo tools and deno from `mise.toml`, and
   `core.hooksPath .githooks`) · **Tests** `mise run test` (nextest; unit tests beside the code in `src/`, the binary's
   tests in `tests/`) · **Lint** `mise run lint` (clippy, warnings as errors) · **Coverage** `mise run coverage` →
-  `lcov.info` · **Gate** `mise run gate` — every job in ci.yml but the Sonar scan.
+  `lcov.info` · **Gate** `mise run gate`.
 - **Toolchain** `rust-toolchain.toml` is the one source for the Rust version; CI, mise and rustup all read it. The cargo
   tools and deno are pinned in `mise.toml`, and CI installs them from there.
 - **Lints** are denied in `Cargo.toml` (`[lints]`), not only in CI: clippy `all` and `pedantic`, and no `unwrap` or
   `expect` outside tests (`clippy.toml`). Fix a lint at its root; an `#[allow]` needs a reason the code cannot show.
-- **Dependencies** pass `cargo deny` (`deny.toml`): permissive licences only, no duplicate versions, crates.io only. A
-  licence allowed there is also accepted in `about.toml`, from which `cargo about` writes the third-party notices the
-  release archive carries.
+- **Dependencies** pass `cargo deny` (`deny.toml`): permissive licences only, no duplicate versions, crates.io only.
 - **Release** is release-please: the version in `Cargo.toml` and `Cargo.lock` is its output, never edited by hand.
   `mise run build:release` packs the archive the release attaches, with `scripts/package.sh`.
-- **The pre-commit hook** formats what is staged of each Rust (rustfmt) and Markdown (deno fmt) file and stops the
-  commit when a formatter fails; a file that also has unstaged changes keeps its staged content and is named.
+- **The pre-commit hook** formats the staged Rust files (rustfmt) and the staged Markdown files deno.json covers (deno
+  fmt), and stops the commit when a formatter fails; a file it would change that also has unstaged changes is committed
+  as staged and named.
 
 ## Pipeline
 
@@ -46,6 +45,6 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
 - **Agent rules**:
   - On the Steam Deck, gate steps run one at a time: `mise run --jobs 1 gate`. Never start a second run while one is
     going.
-  - Scratch files never go in the worktree — `deno fmt --check` reads every Markdown file, and cargo builds any `.rs`
-    file under `tests/`, `examples/`, `benches/` or `src/bin/`.
+  - Scratch files never go in the worktree — `deno fmt --check` reads every Markdown file, and cargo builds every
+    top-level `.rs` file in `tests/`, `examples/`, `benches/` and `src/bin/`.
   - Stop only the processes you started, by PID.

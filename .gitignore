@@ -31,6 +31,3 @@ clippy-report.json
 
 # Git worktrees
 .worktrees/
-
-# deno fmt's lock file
-deno.lock

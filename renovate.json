@@ -59,7 +59,7 @@
       "automerge": false
     },
     {
-      "description": "Never auto-merge a major update, in any ecosystem. Overrides the cargo and GitHub Actions auto-merge rule above for major updates; their minor/patch/digest updates (except the shared reusable workflow from danielcopper/.github) and lock-file maintenance still auto-merge, mise and rust-toolchain updates never do.",
+      "description": "Never auto-merge a major update, in any ecosystem: a guard against a later rule turning auto-merge on for majors.",
       "matchUpdateTypes": [
         "major"
       ],

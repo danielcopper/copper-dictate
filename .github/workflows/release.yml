@@ -1,9 +1,8 @@
 name: Release
 
 # The `release-please` job decides the version, the tag and the changelog; the
-# `assets` job attaches what a tag is worth downloading —
-# `copper-dictate-<tag>-x86_64-linux.tar.gz`, which carries the binary, LICENSE,
-# README.md and the third-party notices, and its `.sha256`.
+# `assets` job attaches what a tag is worth downloading — the archive
+# scripts/package.sh packs, and its `.sha256`.
 #
 # The archive is packed from the tag by the same build and `scripts/package.sh`
 # that every PR's build job runs, so a release is not the first place either is
@@ -14,8 +13,8 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# The jobs need no more than this from GITHUB_TOKEN: release-please writes with
-# the App's token, and `assets` raises its own to `contents: write`.
+# GITHUB_TOKEN stays read-only here: release-please writes with the App's
+# token, and `assets` raises its own.
 permissions:
   contents: read
 
