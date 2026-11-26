@@ -41,8 +41,8 @@ struct Timeouts {
 }
 
 // These end a connection that does not open, a server that stops reading the audio and
-// an answer that stops halfway; the wait for the answer, which a slow server spends
-// transcribing, grows with the recording instead (`answer_minutes`).
+// an answer body that takes longer than a minute; the wait for the answer, which a slow
+// server spends transcribing, grows with the recording instead (`answer_minutes`).
 const TIMEOUTS: Timeouts = Timeouts {
     connect: Duration::from_secs(10),
     write: Duration::from_secs(60),
