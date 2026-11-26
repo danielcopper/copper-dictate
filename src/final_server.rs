@@ -19,6 +19,7 @@ use crate::wav;
 pub(crate) struct HttpFinalServer {
     agent: Agent,
     config: FinalServerConfig,
+    answer_minute: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -27,23 +28,29 @@ enum FinalServerError {
     Status { status: u16, body: String },
     #[error("the final server's answer holds no transcription: {0}")]
     Answer(#[from] serde_json::Error),
+    #[error("the final server did not answer within {minutes} minutes")]
+    NoAnswer { minutes: u32 },
 }
 
 struct Timeouts {
     connect: Duration,
     write: Duration,
-    response: Duration,
     body: Duration,
+    /// The unit of the answer bound; tests shorten it.
+    answer_minute: Duration,
 }
 
-// A 15-minute recording is about 29 MB and its transcription can take minutes,
-// so these end only a server that has stopped, not a slow one.
+// These end a connection that does not open, a server that stops reading the audio and
+// an answer that stops halfway; the wait for the answer, which a slow server spends
+// transcribing, grows with the recording instead (`answer_minutes`).
 const TIMEOUTS: Timeouts = Timeouts {
     connect: Duration::from_secs(10),
     write: Duration::from_secs(60),
-    response: Duration::from_mins(10),
     body: Duration::from_secs(60),
+    answer_minute: Duration::from_mins(1),
 };
+
+const LEAST_ANSWER_MINUTES: u32 = 10;
 
 const ERROR_ANSWER_LIMIT: usize = 1000;
 
@@ -72,12 +79,26 @@ impl HttpFinalServer {
             .http_status_as_error(false)
             .timeout_connect(Some(timeouts.connect))
             .timeout_per_write(Some(timeouts.write))
-            .timeout_recv_response(Some(timeouts.response))
             .timeout_recv_body(Some(timeouts.body))
             .build()
             .new_agent();
-        Self { agent, config }
+        Self {
+            agent,
+            config,
+            answer_minute: timeouts.answer_minute,
+        }
     }
+}
+
+/// Twice the recording's length, at least ten minutes: a server slower than that is cut
+/// off.
+fn answer_minutes(samples: usize) -> u32 {
+    let seconds = u64::try_from(samples)
+        .unwrap_or(u64::MAX)
+        .div_ceil(u64::from(Recording::SAMPLE_RATE));
+    u32::try_from(seconds.saturating_mul(2).div_ceil(60))
+        .unwrap_or(u32::MAX)
+        .max(LEAST_ANSWER_MINUTES)
 }
 
 impl FinalServer for HttpFinalServer {
@@ -91,7 +112,17 @@ impl FinalServer for HttpFinalServer {
         if let Some(key) = &self.config.api_key {
             request = request.header("Authorization", key.bearer());
         }
-        let mut response = request.send(&body[..])?;
+        let minutes = answer_minutes(recording.samples.len());
+        let request = request
+            .config()
+            .timeout_recv_response(Some(self.answer_minute.saturating_mul(minutes)))
+            .build();
+        let mut response = match request.send(&body[..]) {
+            Err(ureq::Error::Timeout(ureq::Timeout::RecvResponse)) => {
+                return Err(FinalServerError::NoAnswer { minutes }.into());
+            }
+            result => result?,
+        };
         let status = response.status();
         if !status.is_success() {
             return Err(FinalServerError::Status {
@@ -163,9 +194,9 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
-    use super::{HttpFinalServer, TIMEOUTS, Timeouts, boundary_absent_from};
+    use super::{HttpFinalServer, TIMEOUTS, Timeouts, answer_minutes, boundary_absent_from};
     use crate::config::{self, ApiKey, FinalServerConfig};
     use crate::session::{BoxError, FinalServer, Recording};
     use crate::test_support::{
@@ -216,6 +247,19 @@ mod tests {
         result
             .recv_timeout(limit)
             .expect("the request ended within the limit")
+    }
+
+    fn server_that_never_answers() -> (String, mpsc::Receiver<Instant>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (sender, read) = mpsc::channel();
+        thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            read_request(&mut BufReader::new(&stream));
+            let _ = sender.send(Instant::now());
+            thread::sleep(Duration::from_secs(30));
+        });
+        (url, read)
     }
 
     fn text_part(name: &str, value: &str) -> Part {
@@ -416,17 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn a_server_that_never_answers_times_out() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}/v1", listener.local_addr().unwrap());
-        thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(&stream);
-            read_request(&mut reader);
-            thread::sleep(Duration::from_secs(30));
-        });
+    fn a_server_that_never_answers_times_out_and_names_the_bound() {
+        let (url, _read) = server_that_never_answers();
         let timeouts = Timeouts {
-            response: SHORT,
+            answer_minute: Duration::from_millis(30),
             ..TIMEOUTS
         };
 
@@ -436,8 +473,48 @@ mod tests {
             Duration::from_secs(10),
         );
 
-        let error = result.unwrap_err();
-        assert!(error.contains("timeout"), "{error}");
+        assert_eq!(
+            result.unwrap_err(),
+            "the final server did not answer within 10 minutes"
+        );
+    }
+
+    #[test]
+    fn a_long_recording_gives_the_server_longer_to_answer() {
+        let (url, read) = server_that_never_answers();
+        let timeouts = Timeouts {
+            answer_minute: Duration::from_millis(100),
+            ..TIMEOUTS
+        };
+
+        let result = transcribe_within(
+            with_timeouts(&url, &timeouts),
+            Recording {
+                samples: vec![0; 10 * 60 * 16_000],
+            },
+            Duration::from_secs(30),
+        );
+        let waited = read.recv().unwrap().elapsed();
+
+        assert_eq!(
+            result.unwrap_err(),
+            "the final server did not answer within 20 minutes"
+        );
+        assert!(
+            waited > Duration::from_millis(1500),
+            "waited {waited:?}: twenty shortened minutes, not ten"
+        );
+    }
+
+    #[test]
+    fn the_answer_bound_is_twice_the_recording_and_at_least_ten_minutes() {
+        let minute = 60 * 16_000;
+
+        assert_eq!(answer_minutes(0), 10);
+        assert_eq!(answer_minutes(5 * minute), 10);
+        assert_eq!(answer_minutes(6 * minute), 12);
+        assert_eq!(answer_minutes(6 * minute + 1), 13, "rounded up");
+        assert_eq!(answer_minutes(15 * minute), 30);
     }
 
     #[test]
