@@ -217,13 +217,10 @@ impl<D: Desktop> Worker<D> {
     }
 
     fn insert(&mut self, text: &str) -> Vec<Trouble> {
-        let Some(text) = contents::pasteable(text) else {
-            return Vec::new();
-        };
         let timeout = self.restore_timeout;
         let troubles = match self.open() {
             Ok((desktop, clipboard, keyboard)) => {
-                paste(desktop, clipboard, keyboard, &text, timeout)
+                paste(desktop, clipboard, keyboard, text, timeout)
             }
             Err(error) => vec![Trouble::NotPasted(error)],
         };
@@ -943,28 +940,6 @@ mod tests {
                 ],
             ])
         );
-    }
-
-    #[test]
-    fn the_final_text_is_offered_without_line_breaks_and_escape_sequences() {
-        let script = script([Previous::Empty, Previous::Empty]);
-
-        inserted(&mut worker(&script, None), "eins\nzwei\u{1b}[201~\r\n");
-
-        assert!(
-            happened(&script).contains(&"offer the clipboard: eins zwei[201~ ".to_owned()),
-            "{:?}",
-            happened(&script)
-        );
-    }
-
-    #[test]
-    fn a_final_text_of_whitespace_alone_is_not_pasted() {
-        let script = script([text("copied"), text("selected")]);
-
-        inserted(&mut worker(&script, None), " \n\t ");
-
-        assert_eq!(happened(&script), Vec::<String>::new());
     }
 
     #[test]

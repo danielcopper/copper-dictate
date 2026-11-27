@@ -36,7 +36,8 @@ pub(crate) trait FinalServer: Send + Sync {
     fn transcribe(&self, recording: &Recording) -> Result<String, BoxError>;
 }
 
-/// Puts a final text at the cursor; returns at once and inserts on its own thread.
+/// Puts a final text at the cursor, which reaches it without control characters and never
+/// blank; returns at once and inserts on its own thread.
 pub(crate) trait Insertion: Send + Sync {
     fn insert(&self, text: String);
 }
@@ -48,6 +49,25 @@ pub(crate) struct FinalText {
 }
 
 pub(crate) type Transcript = Result<FinalText, String>;
+
+/// The final text as it is inserted, so that it cannot press Enter or send an escape sequence;
+/// `None` when nothing but whitespace is left.
+fn insertable(text: &str) -> Option<String> {
+    let mut inserted = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        match char {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                inserted.push(' ');
+            }
+            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => inserted.push(' '),
+            char if char.is_control() => {}
+            char => inserted.push(char),
+        }
+    }
+    (!inserted.trim().is_empty()).then_some(inserted)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -215,7 +235,9 @@ impl Session {
             .final_server
             .transcribe(&recording)
             .map_err(|error| format!("the final server failed: {error}"))?;
-        self.insertion.insert(text.clone());
+        if let Some(inserted) = insertable(&text) {
+            self.insertion.insert(inserted);
+        }
         Ok(FinalText { text, glitches })
     }
 
@@ -234,7 +256,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{AudioSource, FinalText, Outcome, Recording, Session};
+    use super::{AudioSource, FinalText, Outcome, Recording, Session, insertable};
     use crate::test_support::{
         BrokenMicrophone, FakeFinalServer, FakeInsertion, FakeMicrophone, MicrophoneThatStops,
         test_session, wait_until,
@@ -575,6 +597,76 @@ mod tests {
             assert!(matches!(session.toggle(), Outcome::Done(Err(_))));
 
             assert!(inserted.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_insertion_gets_the_final_text_without_control_characters_and_toggle_prints_it_as_sent() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("eins\nzwei\u{1b}[201~\r\n")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+        assert_eq!(session.toggle(), text("eins\nzwei\u{1b}[201~\r\n"));
+
+        assert_eq!(*inserted.lock().unwrap(), ["eins zwei[201~ "]);
+    }
+
+    #[test]
+    fn a_final_text_of_whitespace_alone_is_printed_but_not_inserted() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok(" \n\t ")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+        assert_eq!(session.toggle(), text(" \n\t "));
+
+        assert!(inserted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn line_breaks_of_every_kind_become_one_space() {
+        for text in [
+            "a\nb",
+            "a\r\nb",
+            "a\rb",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+        ] {
+            assert_eq!(insertable(text).as_deref(), Some("a b"), "{text:?}");
+        }
+        assert_eq!(insertable("a\n\nb").as_deref(), Some("a  b"));
+        assert_eq!(insertable("a\r\n").as_deref(), Some("a "));
+    }
+
+    #[test]
+    fn every_other_control_character_is_dropped() {
+        assert_eq!(
+            insertable("\u{1b}[201~rm\u{3}\u{4}\u{7f}\tx\u{9b}2~ Grüße").as_deref(),
+            Some("[201~rmx2~ Grüße")
+        );
+        assert_eq!(insertable("\0a\u{80}\u{9f}b").as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn a_text_of_whitespace_and_control_characters_alone_is_not_inserted() {
+        for text in ["", " ", "\n", " \r\n ", "\u{1b}", "\u{3}\u{2028}"] {
+            assert_eq!(insertable(text), None, "{text:?}");
         }
     }
 

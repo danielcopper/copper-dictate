@@ -28,25 +28,6 @@ const KEPT_RICH_TYPES: [&str; 4] = [
 ];
 const PREFERRED_IMAGE_TYPE: &str = "image/png";
 
-/// The final text as it is pasted, so that it cannot press Enter or send an escape sequence;
-/// `None` when nothing but whitespace is left.
-pub(crate) fn pasteable(text: &str) -> Option<String> {
-    let mut pasted = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(char) = chars.next() {
-        match char {
-            '\r' => {
-                chars.next_if_eq(&'\n');
-                pasted.push(' ');
-            }
-            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => pasted.push(' '),
-            char if char.is_control() => {}
-            char => pasted.push(char),
-        }
-    }
-    (!pasted.trim().is_empty()).then_some(pasted)
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Snapshot {
     pub(crate) contents: Vec<(String, Vec<u8>)>,
@@ -217,7 +198,6 @@ mod tests {
 
     use super::{
         GRACE, KEPT_LIMIT, Lost, Previous, RestoreClock, Snapshot, final_text, keep, kept_types,
-        pasteable,
     };
 
     fn types(names: &[&str]) -> Vec<String> {
@@ -236,38 +216,6 @@ mod tests {
                 .iter()
                 .map(|(mime, why)| ((*mime).to_owned(), why.clone()))
                 .collect(),
-        }
-    }
-
-    #[test]
-    fn line_breaks_of_every_kind_become_one_space() {
-        for text in [
-            "a\nb",
-            "a\r\nb",
-            "a\rb",
-            "a\u{85}b",
-            "a\u{2028}b",
-            "a\u{2029}b",
-        ] {
-            assert_eq!(pasteable(text).as_deref(), Some("a b"), "{text:?}");
-        }
-        assert_eq!(pasteable("a\n\nb").as_deref(), Some("a  b"));
-        assert_eq!(pasteable("a\r\n").as_deref(), Some("a "));
-    }
-
-    #[test]
-    fn every_other_control_character_is_dropped() {
-        assert_eq!(
-            pasteable("\u{1b}[201~rm\u{3}\u{4}\u{7f}\tx\u{9b}2~ Grüße").as_deref(),
-            Some("[201~rmx2~ Grüße")
-        );
-        assert_eq!(pasteable("\0a\u{80}\u{9f}b").as_deref(), Some("ab"));
-    }
-
-    #[test]
-    fn a_text_of_whitespace_and_control_characters_alone_is_not_pasted() {
-        for text in ["", " ", "\n", " \r\n ", "\u{1b}", "\u{3}\u{2028}"] {
-            assert_eq!(pasteable(text), None, "{text:?}");
         }
     }
 
