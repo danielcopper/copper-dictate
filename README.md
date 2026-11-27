@@ -17,8 +17,8 @@
 Self-hosted live dictation for Linux desktops: live preview while you speak, an accurate final text when you stop.
 
 > **Pre-1.0 (v0.x).** Only the final text works yet: a daemon records from the default microphone when you run
-> `copper-dictate toggle`, and the second `toggle` prints the text your transcription server returned. The live preview,
-> the shortcut, insertion at the cursor and the overlay are planned, not features.
+> `copper-dictate toggle`, and the second `toggle` inserts the text your transcription server returned at the cursor
+> (KDE Plasma on Wayland) and prints it. The live preview, the shortcut and the overlay are planned, not features.
 
 ---
 
@@ -33,13 +33,15 @@ Self-hosted live dictation for Linux desktops: live preview while you speak, an 
 - **Accurate final text** — when you stop, the whole recording goes once to a self-hosted OpenAI-compatible
   transcription server (`/v1/audio/transcriptions`) as 16 kHz mono WAV, with automatic language detection unless the
   server has a default language of its own
-- **Nothing but the dictation leaves your machine** — no telemetry, no connection but the configured endpoint (proxy
-  variables are ignored, redirects are not followed), and the recording is dropped once its text is back
+- **Insertion at the cursor on KDE Plasma (Wayland)** — the final text is pasted into the focused window through the
+  clipboard, so umlauts and every keyboard layout work, and the clipboard gets its previous content back
+- **Nothing but the dictation leaves your machine** — no telemetry, no network connection but the configured endpoint
+  (proxy variables are ignored, redirects are not followed), and the recording is dropped once its text is back
 
 ## Planned
 
 - **Live preview** — the text appears while you speak, from a self-hosted realtime WebSocket server
-- **A global shortcut, insertion at the cursor and an overlay** — KDE Plasma first, behind interfaces
+- **A global shortcut and an overlay** — KDE Plasma first, behind interfaces
 
 ## Usage
 
@@ -54,6 +56,9 @@ model = "primeline/whisper-large-v3-turbo-german"
 
 [recording]
 max_seconds = 900 # a recording stops by itself after this long; 15 minutes when left out
+
+[insertion]
+restore_timeout_ms = 1000 # the previous clipboard comes back after this long when nothing pastes; 1000 when left out
 ```
 
 The endpoint is the full URL, `http` or `https`. The API key never goes into this file. It is read from the file
@@ -65,7 +70,7 @@ at start.
 ```sh
 copper-dictate daemon   # keep it running; it stops at once, naming the path and the field, if the configuration is incomplete
 copper-dictate toggle   # start a recording
-copper-dictate toggle   # stop it; prints the final text
+copper-dictate toggle   # stop it; inserts the final text at the cursor and prints it
 ```
 
 `toggle` talks to the daemon over `$XDG_RUNTIME_DIR/copper-dictate/daemon.sock`. A recording that reaches `max_seconds`
@@ -77,6 +82,31 @@ other microphone error fails the dictation. The final server gets twice the reco
 minutes; a server that takes longer fails the dictation. The daemon opens the microphone at 16 kHz where the device
 offers that with a 16-bit, 32-bit or float sample format, and resamples the device's default configuration otherwise; it
 logs the configuration it opened at the start of each recording.
+
+### Insertion at the cursor
+
+On KDE Plasma (Wayland), the daemon inserts the final text at the cursor of the focused window, and `toggle` still
+prints it. Line breaks in the text become spaces and other control characters are dropped, so a dictation never presses
+Enter or sends an escape sequence; a text of whitespace alone is not pasted. The daemon sets the text as the clipboard
+and the primary selection, marked so Klipper keeps no copy, and sends Shift+Insert, which pastes in terminals and in GUI
+text fields alike. It then puts back what the clipboard and the primary selection held before (text, HTML, file lists
+and one image type, up to 64 MiB per selection), 200 ms after the window read the text or after `restore_timeout_ms`
+when nothing read it. Contents a password manager marked are not kept, so that selection is left empty, and a selection
+another application set in the meantime is left as it is. Of the types it keeps, one that does not come back is named on
+stderr with the reason.
+
+The key goes through the desktop's remote-control portal. At the first start Plasma asks for the permission in a "Remote
+Control" dialog; with "Allow restoring on future sessions" ticked, later starts only show a notification, as the daemon
+keeps the portal's token in `$XDG_STATE_HOME/copper-dictate/remote-desktop-token` (`~/.local/state/copper-dictate/` when
+the variable is unset). Without a Wayland session, without `ext-data-control` on the compositor, or with the portal
+missing, it says once on stderr why it cannot insert and keeps dictating, with the text on `toggle`'s output only; a
+final text that ends while the daemon's first remote-control session starts is not inserted either. When one insertion
+fails, the daemon puts the previous contents back where it can, says on stderr what failed and whether the paste key had
+been sent (then the text may be at the cursor all the same), and tries again with the next dictation. If the
+remote-control session has ended, that dictation opens a new one with the saved token. Plasma shows no "End" for this
+session in its tray: the remote control ends when the daemon stops. After the portal ended the session itself (when it
+restarts, for one) or the permission was denied, also at the daemon's start, the daemon deletes the token, so the next
+dictation shows the dialog again, after a restart of the daemon as well.
 
 ## Development
 
@@ -90,7 +120,9 @@ mise run gate    # most of CI's checks, run locally (the list: mise.toml)
 
 The client is one binary crate, its modules grouped by role. `src/session.rs` is the core, the platform-independent
 logic of a dictation. `src/audio/` holds the audio source (the microphone and its resampling to 16 kHz mono),
-`src/servers/` the clients of the servers (today the final server's, with its WAV encoding), and `src/daemon.rs` the
+`src/servers/` the clients of the servers (today the final server's, with its WAV encoding), `src/platform/` the
+platform parts (today the insertion on KDE Plasma: the clipboard through `ext-data-control`, the remote-desktop portal
+and its emulated keyboard, and which clipboard contents are kept and when they come back), and `src/daemon.rs` the
 daemon, with the socket protocol it shares with `toggle` in `src/daemon/protocol.rs` and the `toggle` command in
 `src/daemon/toggle.rs`. The configuration (`config.rs`), the XDG directories (`xdg.rs`) and the log lines (`log.rs`) sit
 at the top.

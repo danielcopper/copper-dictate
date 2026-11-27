@@ -36,6 +36,12 @@ pub(crate) trait FinalServer: Send + Sync {
     fn transcribe(&self, recording: &Recording) -> Result<String, BoxError>;
 }
 
+/// Puts a final text at the cursor, which reaches it without control characters and never
+/// blank; returns at once and inserts on its own thread.
+pub(crate) trait Insertion: Send + Sync {
+    fn insert(&self, text: String);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FinalText {
     pub(crate) text: String,
@@ -43,6 +49,25 @@ pub(crate) struct FinalText {
 }
 
 pub(crate) type Transcript = Result<FinalText, String>;
+
+/// The final text as it is inserted, so that it cannot press Enter or send an escape sequence;
+/// `None` when nothing but whitespace is left.
+fn insertable(text: &str) -> Option<String> {
+    let mut inserted = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(char) = chars.next() {
+        match char {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                inserted.push(' ');
+            }
+            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => inserted.push(' '),
+            char if char.is_control() => {}
+            char => inserted.push(char),
+        }
+    }
+    (!inserted.trim().is_empty()).then_some(inserted)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -77,6 +102,7 @@ impl Shared {
 pub(crate) struct Session {
     audio: Box<dyn AudioSource>,
     final_server: Box<dyn FinalServer>,
+    insertion: Box<dyn Insertion>,
     max_recording: Duration,
     shared: Mutex<Shared>,
     changed: Condvar,
@@ -86,11 +112,13 @@ impl Session {
     pub(crate) fn new(
         audio: Box<dyn AudioSource>,
         final_server: Box<dyn FinalServer>,
+        insertion: Box<dyn Insertion>,
         max_recording: Duration,
     ) -> Arc<Self> {
         Arc::new(Self {
             audio,
             final_server,
+            insertion,
             max_recording,
             shared: Mutex::new(Shared {
                 state: State::Idle,
@@ -207,6 +235,9 @@ impl Session {
             .final_server
             .transcribe(&recording)
             .map_err(|error| format!("the final server failed: {error}"))?;
+        if let Some(inserted) = insertable(&text) {
+            self.insertion.insert(inserted);
+        }
         Ok(FinalText { text, glitches })
     }
 
@@ -225,9 +256,10 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use super::{FinalText, Outcome, Recording, Session};
+    use super::{AudioSource, FinalText, Outcome, Recording, Session, insertable};
     use crate::test_support::{
-        BrokenMicrophone, FakeFinalServer, FakeMicrophone, MicrophoneThatStops, wait_until,
+        BrokenMicrophone, FakeFinalServer, FakeInsertion, FakeMicrophone, MicrophoneThatStops,
+        test_session, wait_until,
     };
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
@@ -253,7 +285,7 @@ mod tests {
         let (microphone, events) = FakeMicrophone::new(vec![1, 2, 3]);
         let final_server = FakeFinalServer::answering(&[Ok("hello")]);
         let received = final_server.received.clone();
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
 
         assert_eq!(session.toggle(), Outcome::Started);
         assert_eq!(events.try_recv(), Ok("start"));
@@ -271,7 +303,7 @@ mod tests {
     fn the_toggle_after_a_dictation_starts_the_next_one() {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Ok("one"), Ok("two")]);
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
 
         session.toggle();
         session.toggle();
@@ -289,7 +321,7 @@ mod tests {
         let (microphone, events) = FakeMicrophone::new(vec![7; 100]);
         let final_server = FakeFinalServer::answering(&[Ok("at the limit")]);
         let received = final_server.received.clone();
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(final_server),
             Duration::from_millis(50),
@@ -315,7 +347,7 @@ mod tests {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let (final_server, release) = FakeFinalServer::answering(&[Ok("waited for")]).held();
         let received = final_server.received.clone();
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(final_server),
             Duration::from_millis(50),
@@ -339,7 +371,7 @@ mod tests {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
         let (final_server, release) = FakeFinalServer::answering(&[Ok("first")]).held();
         let received = final_server.received.clone();
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         session.toggle();
         let stopping = thread::spawn({
             let session = session.clone();
@@ -359,7 +391,7 @@ mod tests {
     fn a_failed_final_request_is_reported_and_the_session_is_ready_again() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Err("connection refused"), Ok("again")]);
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
 
         session.toggle();
         assert_eq!(
@@ -372,7 +404,7 @@ mod tests {
 
     #[test]
     fn a_microphone_that_does_not_start_is_reported() {
-        let session = Session::new(
+        let session = test_session(
             Box::new(BrokenMicrophone),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,
@@ -388,7 +420,7 @@ mod tests {
     fn the_limit_timer_of_a_stopped_recording_does_not_touch_the_next_one() {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Ok("first"), Ok("second")]);
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(final_server),
             Duration::from_millis(2000),
@@ -412,7 +444,7 @@ mod tests {
         let (microphone, _events) = FakeMicrophone::new(Vec::new());
         let final_server = FakeFinalServer::answering(&[]);
         let received = final_server.received.clone();
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
 
         session.toggle();
 
@@ -425,7 +457,7 @@ mod tests {
 
     #[test]
     fn a_microphone_that_stops_during_the_recording_fails_the_dictation() {
-        let session = Session::new(
+        let session = test_session(
             Box::new(MicrophoneThatStops),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,
@@ -443,7 +475,7 @@ mod tests {
     fn the_glitches_of_a_recording_reach_its_final_text() {
         let (microphone, _events) = FakeMicrophone::glitching(vec![1], 5);
         let final_server = FakeFinalServer::answering(&[Ok("glitchy")]);
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
 
         session.toggle();
 
@@ -460,7 +492,7 @@ mod tests {
     fn a_kept_transcript_is_returned_by_the_next_toggle_instead_of_a_new_recording() {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Ok("undelivered")]);
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         session.toggle();
         let Outcome::Done(transcript) = session.toggle() else {
             panic!("the stop ends the dictation");
@@ -478,10 +510,171 @@ mod tests {
     }
 
     #[test]
+    fn each_dictation_hands_its_final_text_to_the_insertion_once() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("first"), Ok("second")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+        assert!(
+            inserted.lock().unwrap().is_empty(),
+            "nothing before the stop"
+        );
+        assert_eq!(session.toggle(), text("first"));
+        assert_eq!(*inserted.lock().unwrap(), ["first"]);
+        session.toggle();
+        session.toggle();
+
+        assert_eq!(*inserted.lock().unwrap(), ["first", "second"]);
+    }
+
+    #[test]
+    fn a_dictation_stopped_at_the_limit_is_inserted_once_and_not_again_when_printed() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("at the limit")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            Duration::from_millis(50),
+        );
+
+        session.toggle();
+        wait_until(|| session.holds_a_transcript());
+        assert_eq!(*inserted.lock().unwrap(), ["at the limit"]);
+
+        assert_eq!(session.toggle(), text("at the limit"));
+        assert_eq!(*inserted.lock().unwrap(), ["at the limit"]);
+    }
+
+    #[test]
+    fn a_kept_transcript_is_not_inserted_again_by_the_toggle_that_prints_it() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("undelivered")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+        session.toggle();
+        let Outcome::Done(transcript) = session.toggle() else {
+            panic!("the stop ends the dictation");
+        };
+        session.keep(transcript);
+
+        assert_eq!(session.toggle(), text("undelivered"));
+        assert_eq!(*inserted.lock().unwrap(), ["undelivered"]);
+    }
+
+    #[test]
+    fn a_failed_dictation_inserts_nothing() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let (silent, _silent_events) = FakeMicrophone::new(Vec::new());
+        for audio in [
+            Box::new(microphone) as Box<dyn AudioSource>,
+            Box::new(silent),
+            Box::new(MicrophoneThatStops),
+        ] {
+            let final_server = FakeFinalServer::answering(&[Err("timed out")]);
+            let insertion = FakeInsertion::default();
+            let inserted = insertion.inserted.clone();
+            let session =
+                Session::new(audio, Box::new(final_server), Box::new(insertion), NO_LIMIT);
+
+            session.toggle();
+            assert!(matches!(session.toggle(), Outcome::Done(Err(_))));
+
+            assert!(inserted.lock().unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn the_insertion_gets_the_final_text_without_control_characters_and_toggle_prints_it_as_sent() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok("eins\nzwei\u{1b}[201~\r\n")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+        assert_eq!(session.toggle(), text("eins\nzwei\u{1b}[201~\r\n"));
+
+        assert_eq!(*inserted.lock().unwrap(), ["eins zwei[201~ "]);
+    }
+
+    #[test]
+    fn a_final_text_of_whitespace_alone_is_printed_but_not_inserted() {
+        let (microphone, _events) = FakeMicrophone::new(vec![1]);
+        let final_server = FakeFinalServer::answering(&[Ok(" \n\t ")]);
+        let insertion = FakeInsertion::default();
+        let inserted = insertion.inserted.clone();
+        let session = Session::new(
+            Box::new(microphone),
+            Box::new(final_server),
+            Box::new(insertion),
+            NO_LIMIT,
+        );
+
+        session.toggle();
+        assert_eq!(session.toggle(), text(" \n\t "));
+
+        assert!(inserted.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn line_breaks_of_every_kind_become_one_space() {
+        for text in [
+            "a\nb",
+            "a\r\nb",
+            "a\rb",
+            "a\u{85}b",
+            "a\u{2028}b",
+            "a\u{2029}b",
+        ] {
+            assert_eq!(insertable(text).as_deref(), Some("a b"), "{text:?}");
+        }
+        assert_eq!(insertable("a\n\nb").as_deref(), Some("a  b"));
+        assert_eq!(insertable("a\r\n").as_deref(), Some("a "));
+    }
+
+    #[test]
+    fn every_other_control_character_is_dropped() {
+        assert_eq!(
+            insertable("\u{1b}[201~rm\u{3}\u{4}\u{7f}\tx\u{9b}2~ Grüße").as_deref(),
+            Some("[201~rmx2~ Grüße")
+        );
+        assert_eq!(insertable("\0a\u{80}\u{9f}b").as_deref(), Some("ab"));
+    }
+
+    #[test]
+    fn a_text_of_whitespace_and_control_characters_alone_is_not_inserted() {
+        for text in ["", " ", "\n", " \r\n ", "\u{1b}", "\u{3}\u{2028}"] {
+            assert_eq!(insertable(text), None, "{text:?}");
+        }
+    }
+
+    #[test]
     fn a_transcript_is_not_kept_once_a_new_recording_runs() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
         let final_server = FakeFinalServer::answering(&[Ok("next")]);
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         session.toggle();
 
         assert!(!session.keep(Ok(final_text("late"))));

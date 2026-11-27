@@ -1,6 +1,7 @@
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 /// A directory standing in for `HOME`, `XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR`, removed on drop.
 struct Sandbox(PathBuf);
@@ -116,4 +117,50 @@ fn the_daemon_does_not_start_with_a_missing_field_and_names_it() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(config.to_str().unwrap()), "{stderr}");
     assert!(stderr.contains("missing field `endpoint`"), "{stderr}");
+}
+
+/// The daemon's stderr up to the line that says where it listens, after which it is stopped.
+fn lines_until_listening(mut daemon: Command) -> Vec<String> {
+    let mut daemon = daemon.stderr(Stdio::piped()).spawn().unwrap();
+    let mut stderr = BufReader::new(daemon.stderr.take().unwrap());
+    let mut lines = Vec::new();
+    loop {
+        let mut line = String::new();
+        if stderr.read_line(&mut line).unwrap() == 0 {
+            break;
+        }
+        let listening = line.starts_with("copper-dictate: listening at ");
+        lines.push(line);
+        if listening {
+            break;
+        }
+    }
+    daemon.kill().unwrap();
+    daemon.wait().unwrap();
+    lines
+}
+
+#[test]
+fn without_a_wayland_session_the_daemon_starts_and_says_once_why_it_cannot_insert() {
+    let sandbox = Sandbox::new("no-wayland");
+    let config = sandbox.path().join("config/copper-dictate/config.toml");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        "[final]\nendpoint = \"http://127.0.0.1:9/v1/audio/transcriptions\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    let socket = sandbox.path().join("runtime/copper-dictate/daemon.sock");
+    let expected = [
+        "copper-dictate: cannot insert at the cursor: no Wayland session (WAYLAND_DISPLAY is not set); the final text reaches only toggle's output\n".to_owned(),
+        format!("copper-dictate: listening at {}\n", socket.display()),
+    ];
+
+    assert_eq!(
+        lines_until_listening(sandbox.command(&["daemon"])),
+        expected
+    );
+    let mut empty_display = sandbox.command(&["daemon"]);
+    empty_display.env("WAYLAND_DISPLAY", "");
+    assert_eq!(lines_until_listening(empty_display), expected);
 }

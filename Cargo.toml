@@ -11,6 +11,9 @@ publish = false
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
+futures-core = "0.3"
+reis = "0.7"
+rustix = { version = "1", features = ["event", "time"] }
 # ring, not aws-lc-rs: aws-lc-sys carries the OpenSSL licence, which deny.toml rejects.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 serde = { version = "1", features = ["derive"] }
@@ -19,6 +22,10 @@ thiserror = "2"
 toml = { version = "1", default-features = false, features = ["parse", "serde", "std"] }
 # The platform verifier, not webpki-roots: that crate's CDLA-Permissive-2.0 licence is not in deny.toml.
 ureq = { version = "3", default-features = false, features = ["platform-verifier", "rustls-no-provider"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# Without the default tracing feature, whose proc-macro is still on syn 2 beside the syn 3 of the rest.
+zbus = { version = "6", default-features = false, features = ["default-rt", "proxy"] }
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,9 +1,8 @@
 pub(crate) mod protocol;
 pub(crate) mod toggle;
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::{self, BufReader};
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use thiserror::Error;
 use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
 use crate::log;
 use crate::session::{Outcome, Session};
+use crate::xdg;
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
@@ -32,11 +32,7 @@ pub(crate) fn bind(socket: &Path) -> Result<UnixListener, BindError> {
         source,
     };
     if let Some(dir) = socket.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(io_error)?;
+        xdg::create_private_dir(dir).map_err(io_error)?;
     }
     match UnixListener::bind(socket) {
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
@@ -138,7 +134,7 @@ mod tests {
     use crate::session::{Outcome, Session};
     use crate::test_support::{
         BrokenMicrophone, FakeFinalServer, FakeHttpServer, FakeMicrophone, TempDir, decode,
-        final_server_config, wait_until,
+        final_server_config, test_session, wait_until,
     };
 
     const NO_LIMIT: Duration = Duration::from_secs(3600);
@@ -194,7 +190,7 @@ mod tests {
     fn two_toggles_print_the_text_the_final_server_returned_for_the_audio() {
         let fake = FakeHttpServer::start(vec![(200, r#"{"text":"Hallo Welt"}"#.to_owned())]);
         let (microphone, events) = FakeMicrophone::new(tone(3));
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(http_final_server(&fake.url)),
             NO_LIMIT,
@@ -218,7 +214,7 @@ mod tests {
     fn a_ten_minute_recording_is_sent_whole_and_its_text_printed() {
         let fake = FakeHttpServer::start(vec![(200, r#"{"text":"ten minutes"}"#.to_owned())]);
         let (microphone, _events) = FakeMicrophone::new(tone(600));
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(http_final_server(&fake.url)),
             Duration::from_mins(15),
@@ -240,7 +236,7 @@ mod tests {
     fn a_recording_that_reaches_the_limit_stops_by_itself_and_its_text_is_printed() {
         let fake = FakeHttpServer::start(vec![(200, r#"{"text":"cut at the limit"}"#.to_owned())]);
         let (microphone, events) = FakeMicrophone::new(tone(1));
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(http_final_server(&fake.url)),
             Duration::from_millis(200),
@@ -268,7 +264,7 @@ mod tests {
     #[test]
     fn a_failed_dictation_is_reported_on_stderr_and_fails() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[Err("timed out")])),
             NO_LIMIT,
@@ -285,7 +281,7 @@ mod tests {
     #[test]
     fn a_line_that_is_no_request_gets_an_error() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,
@@ -307,7 +303,7 @@ mod tests {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
         let (final_server, release) = FakeFinalServer::answering(&[Ok("kept for later")]).held();
         let received = final_server.received.clone();
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         let daemon = Daemon::start(Arc::clone(&session));
         daemon.toggle();
         let mut gone = UnixStream::connect(socket_in(&daemon.runtime_dir)).unwrap();
@@ -328,7 +324,7 @@ mod tests {
     #[test]
     fn a_failure_whose_toggle_went_away_is_printed_by_the_next_toggle() {
         let (microphone, events) = FakeMicrophone::new(vec![1]);
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[Err("timed out")])),
             NO_LIMIT,
@@ -351,7 +347,7 @@ mod tests {
 
     #[test]
     fn a_refusal_whose_toggle_went_away_is_never_kept() {
-        let session = Session::new(
+        let session = test_session(
             Box::new(BrokenMicrophone),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,
@@ -369,7 +365,7 @@ mod tests {
     #[test]
     fn a_dictation_the_microphone_glitched_in_prints_its_text_and_warns_how_often() {
         let (microphone, _events) = FakeMicrophone::glitching(vec![1], 3);
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[Ok("despite the glitches")])),
             NO_LIMIT,
@@ -390,7 +386,7 @@ mod tests {
     #[test]
     fn the_glitch_warning_of_a_recording_stopped_at_the_limit_reaches_the_next_toggle() {
         let (microphone, _events) = FakeMicrophone::glitching(vec![1], 1);
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[Ok("cut at the limit")])),
             Duration::from_millis(50),
@@ -414,7 +410,7 @@ mod tests {
         let (microphone, _events) = FakeMicrophone::glitching(vec![1], 2);
         let (final_server, release) = FakeFinalServer::answering(&[Ok("kept for later")]).held();
         let received = final_server.received.clone();
-        let session = Session::new(Box::new(microphone), Box::new(final_server), NO_LIMIT);
+        let session = test_session(Box::new(microphone), Box::new(final_server), NO_LIMIT);
         let daemon = Daemon::start(Arc::clone(&session));
         daemon.toggle();
         let mut gone = UnixStream::connect(socket_in(&daemon.runtime_dir)).unwrap();
@@ -434,7 +430,7 @@ mod tests {
     #[test]
     fn an_accept_error_does_not_end_the_daemon() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
-        let session = Session::new(
+        let session = test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,
@@ -460,7 +456,7 @@ mod tests {
     #[test]
     fn a_connection_closed_without_a_request_gets_no_answer() {
         let (microphone, _events) = FakeMicrophone::new(vec![1]);
-        let daemon = Daemon::start(Session::new(
+        let daemon = Daemon::start(test_session(
             Box::new(microphone),
             Box::new(FakeFinalServer::answering(&[])),
             NO_LIMIT,

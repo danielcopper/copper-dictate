@@ -12,11 +12,19 @@ use crate::xdg::{self, Env};
 
 const API_KEY_VARIABLE: &str = "COPPER_DICTATE_FINAL_API_KEY";
 const DEFAULT_MAX_RECORDING_SECONDS: u64 = 15 * 60;
+const DEFAULT_RESTORE_TIMEOUT_MS: u64 = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Config {
     pub(crate) final_server: FinalServerConfig,
     pub(crate) max_recording: Duration,
+    pub(crate) insertion: InsertionConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InsertionConfig {
+    /// How long the previous clipboard waits for the target to read the final text.
+    pub(crate) restore_timeout: Duration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,6 +103,8 @@ struct File {
     final_server: FinalSection,
     #[serde(default)]
     recording: RecordingSection,
+    #[serde(default)]
+    insertion: InsertionSection,
 }
 
 #[derive(Deserialize)]
@@ -119,9 +129,23 @@ impl Default for RecordingSection {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct InsertionSection {
+    restore_timeout_ms: u64,
+}
+
+impl Default for InsertionSection {
+    fn default() -> Self {
+        Self {
+            restore_timeout_ms: DEFAULT_RESTORE_TIMEOUT_MS,
+        }
+    }
+}
+
 pub(crate) fn path(env: Env<'_>) -> Result<PathBuf, ConfigError> {
     let config_home = xdg::config_home(env).ok_or(ConfigError::NoConfigDir)?;
-    Ok(config_home.join("copper-dictate").join("config.toml"))
+    Ok(xdg::app_dir(&config_home).join("config.toml"))
 }
 
 pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {
@@ -140,6 +164,11 @@ pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {
     if file.recording.max_seconds == 0 {
         return Err(invalid(
             "max_seconds in [recording] must be at least 1".to_owned(),
+        ));
+    }
+    if file.insertion.restore_timeout_ms == 0 {
+        return Err(invalid(
+            "restore_timeout_ms in [insertion] must be at least 1".to_owned(),
         ));
     }
 
@@ -177,6 +206,9 @@ pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {
             api_key,
         },
         max_recording: Duration::from_secs(file.recording.max_seconds),
+        insertion: InsertionConfig {
+            restore_timeout: Duration::from_millis(file.insertion.restore_timeout_ms),
+        },
     })
 }
 
@@ -195,7 +227,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    use super::{ApiKey, Config, ConfigError, FinalServerConfig, KeyError, load, path};
+    use super::{
+        ApiKey, Config, ConfigError, FinalServerConfig, InsertionConfig, KeyError, load, path,
+    };
     use crate::test_support::TempDir;
 
     const MINIMAL: &str = r#"
@@ -284,7 +318,8 @@ mod tests {
     }
 
     #[test]
-    fn a_minimal_file_gives_the_endpoint_the_model_and_a_fifteen_minute_limit() {
+    fn a_minimal_file_gives_the_endpoint_the_model_a_fifteen_minute_limit_and_a_one_second_restore()
+    {
         let dir = TempDir::new();
         let config_path = write_config(&dir, MINIMAL);
 
@@ -301,8 +336,40 @@ mod tests {
                     api_key: None,
                 },
                 max_recording: Duration::from_mins(15),
+                insertion: InsertionConfig {
+                    restore_timeout: Duration::from_secs(1),
+                },
             }
         );
+    }
+
+    #[test]
+    fn the_restore_timeout_is_configurable() {
+        let dir = TempDir::new();
+        let config_path = write_config(
+            &dir,
+            &format!("{MINIMAL}\n[insertion]\nrestore_timeout_ms = 2500\n"),
+        );
+
+        let config = load(&config_path, &env(&[])).unwrap();
+
+        assert_eq!(
+            config.insertion.restore_timeout,
+            Duration::from_millis(2500)
+        );
+    }
+
+    #[test]
+    fn a_zero_restore_timeout_is_refused() {
+        let dir = TempDir::new();
+        let config_path = write_config(
+            &dir,
+            &format!("{MINIMAL}\n[insertion]\nrestore_timeout_ms = 0\n"),
+        );
+
+        let message = invalid_message(load(&config_path, &env(&[])), &config_path);
+
+        assert!(message.contains("restore_timeout_ms"), "{message}");
     }
 
     #[test]

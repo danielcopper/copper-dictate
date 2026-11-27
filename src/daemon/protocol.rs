@@ -15,7 +15,7 @@ const SOCKET_FILE: &str = "daemon.sock";
 
 pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
     xdg::runtime_dir(env)
-        .map(|dir| dir.join("copper-dictate").join(SOCKET_FILE))
+        .map(|dir| xdg::app_dir(&dir).join(SOCKET_FILE))
         .ok_or(NoRuntimeDir)
 }
 
@@ -142,9 +142,16 @@ mod tests {
     fn socket_clients() -> Vec<(String, String)> {
         let clients: Vec<(String, String)> = production_code()
             .into_iter()
-            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("UnixStream"))
+            .filter(|(name, code)| {
+                name != "daemon/protocol.rs"
+                    && code.contains("UnixStream")
+                    && code.contains("daemon::protocol")
+            })
             .collect();
-        assert!(!clients.is_empty(), "no module uses a UnixStream");
+        assert!(
+            !clients.is_empty(),
+            "no module uses a UnixStream with the daemon protocol"
+        );
         clients
     }
 
