@@ -49,21 +49,28 @@ impl KeyboardError {
     }
 }
 
-pub(crate) struct Keyboard {
+/// `portal` is what the input emulation lasts as long as.
+pub(crate) struct Keyboard<P = zbus::Connection> {
     context: ei::Context,
     connection: event::Connection,
     converter: EiEventConverter,
     device: Option<event::Device>,
     resumed: bool,
     sequence: u32,
-    _portal: zbus::Connection,
+    _portal: P,
 }
 
 impl Keyboard {
     /// Sets the input emulation up and waits for its keyboard, both within a few seconds.
     pub(crate) fn connect(session: RemoteDesktop) -> Result<Self, KeyboardError> {
         let (portal, eis) = session.into_parts();
-        let context = ei::Context::new(UnixStream::from(eis))?;
+        Self::over(UnixStream::from(eis), portal)
+    }
+}
+
+impl<P> Keyboard<P> {
+    fn over(socket: UnixStream, portal: P) -> Result<Self, KeyboardError> {
+        let context = ei::Context::new(socket)?;
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         let handshake = handshake(&context, deadline)?;
         let converter = EiEventConverter::new(&context, handshake);
@@ -76,6 +83,7 @@ impl Keyboard {
             sequence: 0,
             _portal: portal,
         };
+        keyboard.handle_what_was_read()?;
         while !keyboard.resumed {
             if Instant::now() >= deadline {
                 return Err(if keyboard.device.is_some() {
@@ -101,6 +109,11 @@ impl Keyboard {
     /// Handles what the compositor sent; call it when the socket is readable.
     pub(crate) fn dispatch(&mut self) -> Result<(), KeyboardError> {
         read(&self.context)?;
+        self.handle_what_was_read()
+    }
+
+    /// The handshake's read may already hold what follows it, such as the compositor's seat.
+    fn handle_what_was_read(&mut self) -> Result<(), KeyboardError> {
         while let Some(result) = self.context.pending_event() {
             match result {
                 PendingRequestResult::Request(event) => self.converter.handle_event(event)?,
@@ -233,10 +246,74 @@ fn now_in_microseconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use reis::ei::connection::DisconnectReason;
-    use reis::event::Disconnected;
+    use std::os::unix::net::UnixStream;
+    use std::thread;
 
-    use super::{KeyboardError, lost};
+    use reis::PendingRequestResult;
+    use reis::ei::connection::DisconnectReason;
+    use reis::eis::{self, device::DeviceType};
+    use reis::event::{DeviceCapability, Disconnected};
+    use reis::handshake::{EisHandshakeResp, EisHandshaker};
+    use reis::request::{EisRequest, EisRequestConverter};
+    use rustix::event::{PollFd, PollFlags};
+
+    use super::{Keyboard, KeyboardError, lost};
+
+    fn next_request(context: &eis::Context) -> eis::Request {
+        loop {
+            if let Some(result) = context.pending_request() {
+                let PendingRequestResult::Request(request) = result else {
+                    panic!("the client sent a request the compositor does not understand");
+                };
+                return request;
+            }
+            rustix::event::poll(&mut [PollFd::new(context, PollFlags::IN)], None).unwrap();
+            context.read().unwrap();
+        }
+    }
+
+    fn handshake(context: &eis::Context) -> EisHandshakeResp {
+        let mut handshaker = EisHandshaker::new(context, 1);
+        loop {
+            if let Some(response) = handshaker.handle_request(next_request(context)).unwrap() {
+                return response;
+            }
+        }
+    }
+
+    /// Adds its seat right after the handshake, so the client reads the handshake's answer and
+    /// the seat at once; the keyboard follows the client's bind.
+    fn compositor(socket: UnixStream) {
+        let context = eis::Context::new(socket).unwrap();
+        let mut converter = EisRequestConverter::new(&context, handshake(&context), 1);
+        let seat = converter
+            .handle()
+            .add_seat(Some("seat"), DeviceCapability::Keyboard.into());
+        context.flush().unwrap();
+        loop {
+            converter.handle_request(next_request(&context)).unwrap();
+            if let Some(EisRequest::Bind(_)) = converter.next_request() {
+                let device = seat.add_device(
+                    Some("keyboard"),
+                    DeviceType::Virtual,
+                    DeviceCapability::Keyboard.into(),
+                    |_| {},
+                );
+                device.resumed();
+                context.flush().unwrap();
+                return;
+            }
+        }
+    }
+
+    #[test]
+    fn a_seat_that_arrives_with_the_handshakes_answer_brings_the_keyboard() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let compositor = thread::spawn(move || compositor(server));
+        let keyboard = Keyboard::over(client, ());
+        assert!(keyboard.is_ok(), "{:?}", keyboard.err());
+        compositor.join().unwrap();
+    }
 
     fn disconnected(reason: DisconnectReason) -> Disconnected {
         Disconnected {
