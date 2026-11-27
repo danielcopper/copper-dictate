@@ -2,6 +2,7 @@ mod audio;
 mod config;
 mod daemon;
 mod log;
+mod platform;
 mod servers;
 mod session;
 #[cfg(test)]
@@ -19,7 +20,7 @@ use crate::audio::microphone::Microphone;
 use crate::config::Config;
 use crate::daemon::protocol;
 use crate::servers::final_server::HttpFinalServer;
-use crate::session::{AudioSource, BoxError, Session};
+use crate::session::{AudioSource, BoxError, Insertion, Session};
 use crate::xdg::Env;
 
 #[derive(Debug, Parser)]
@@ -69,16 +70,25 @@ fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
     let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
-    let session = session(config, Box::new(Microphone));
+    let session = session(
+        config,
+        Box::new(Microphone),
+        Box::new(platform::NoInsertion),
+    );
     log::eprint(format_args!("listening at {}", socket.display()));
     daemon::serve(&listener, &session);
     Ok(())
 }
 
-fn session(config: Config, audio: Box<dyn AudioSource>) -> Arc<Session> {
+fn session(
+    config: Config,
+    audio: Box<dyn AudioSource>,
+    insertion: Box<dyn Insertion>,
+) -> Arc<Session> {
     Session::new(
         audio,
         Box::new(HttpFinalServer::new(config.final_server)),
+        insertion,
         config.max_recording,
     )
 }
@@ -93,7 +103,9 @@ mod tests {
     use super::{Cli, session};
     use crate::config::Config;
     use crate::session::Outcome;
-    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config, source_files};
+    use crate::test_support::{
+        FakeHttpServer, FakeInsertion, FakeMicrophone, final_server_config, source_files,
+    };
 
     const ROLES: [&str; 4] = ["audio", "daemon", "platform", "servers"];
     const AT_THE_TOP: [&str; 6] = [
@@ -113,7 +125,11 @@ mod tests {
             final_server: final_server_config(&fake.url, None),
             max_recording: Duration::from_millis(300),
         };
-        let session = session(config, Box::new(microphone));
+        let session = session(
+            config,
+            Box::new(microphone),
+            Box::new(FakeInsertion::default()),
+        );
 
         assert_eq!(session.toggle(), Outcome::Started);
 

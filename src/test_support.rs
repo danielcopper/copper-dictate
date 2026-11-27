@@ -10,7 +10,9 @@ use std::time::{Duration, Instant};
 use std::{fs, process};
 
 use crate::config::{ApiKey, FinalServerConfig};
-use crate::session::{AudioSource, BoxError, Capture, FinalServer, Recording, Stopped};
+use crate::session::{
+    AudioSource, BoxError, Capture, FinalServer, Insertion, Recording, Session, Stopped,
+};
 
 pub(crate) struct TempDir(PathBuf);
 
@@ -329,6 +331,31 @@ impl FinalServer for FakeFinalServer {
         let answer = self.answers.lock().unwrap().pop().expect("an answer left");
         answer.map_err(Into::into)
     }
+}
+
+#[derive(Default)]
+pub(crate) struct FakeInsertion {
+    pub(crate) inserted: Arc<Mutex<Vec<String>>>,
+}
+
+impl Insertion for FakeInsertion {
+    fn insert(&self, text: String) {
+        self.inserted.lock().unwrap().push(text);
+    }
+}
+
+/// A session whose final texts go to a [`FakeInsertion`] nobody looks at.
+pub(crate) fn test_session(
+    audio: Box<dyn AudioSource>,
+    final_server: Box<dyn FinalServer>,
+    max_recording: Duration,
+) -> Arc<Session> {
+    Session::new(
+        audio,
+        final_server,
+        Box::new(FakeInsertion::default()),
+        max_recording,
+    )
 }
 
 #[derive(Debug, PartialEq, Eq)]
