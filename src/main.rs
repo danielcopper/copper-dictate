@@ -70,11 +70,8 @@ fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
     let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
-    let session = session(
-        config,
-        Box::new(Microphone),
-        Box::new(platform::NoInsertion),
-    );
+    let insertion = platform::insertion(env, config.insertion.clone());
+    let session = session(config, Box::new(Microphone), insertion);
     log::eprint(format_args!("listening at {}", socket.display()));
     daemon::serve(&listener, &session);
     Ok(())
@@ -101,7 +98,7 @@ mod tests {
     use clap::CommandFactory;
 
     use super::{Cli, session};
-    use crate::config::Config;
+    use crate::config::{Config, InsertionConfig};
     use crate::session::Outcome;
     use crate::test_support::{
         FakeHttpServer, FakeInsertion, FakeMicrophone, final_server_config, source_files,
@@ -124,6 +121,9 @@ mod tests {
         let config = Config {
             final_server: final_server_config(&fake.url, None),
             max_recording: Duration::from_millis(300),
+            insertion: InsertionConfig {
+                restore_timeout: Duration::from_secs(1),
+            },
         };
         let session = session(
             config,

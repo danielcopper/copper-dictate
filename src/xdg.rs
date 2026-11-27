@@ -9,6 +9,11 @@ pub(crate) fn config_home(env: Env<'_>) -> Option<PathBuf> {
         .or_else(|| absolute(env("HOME")).map(|home| home.join(".config")))
 }
 
+pub(crate) fn state_home(env: Env<'_>) -> Option<PathBuf> {
+    absolute(env("XDG_STATE_HOME"))
+        .or_else(|| absolute(env("HOME")).map(|home| home.join(".local").join("state")))
+}
+
 pub(crate) fn runtime_dir(env: Env<'_>) -> Option<PathBuf> {
     absolute(env("XDG_RUNTIME_DIR"))
 }
