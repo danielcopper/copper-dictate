@@ -1,6 +1,6 @@
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +29,22 @@ enum PasteError {
     Wait(#[from] io::Error),
 }
 
+#[derive(Debug, Error)]
+enum Trouble {
+    #[error(
+        "cannot insert this final text at the cursor: {0}; it reaches only toggle's output, and \
+         the next dictation tries again"
+    )]
+    NotPasted(PasteError),
+    #[error(
+        "the paste key was sent, but then {0}; if the final text is not at the cursor, toggle's \
+         output has it"
+    )]
+    AfterTheKey(PasteError),
+    #[error("the {0}'s previous contents do not come back after the insertion: {1}")]
+    NotRestored(Selection, ClipboardError),
+}
+
 /// Inserts by pasting: the final text goes to the clipboard and the primary selection, the
 /// paste key is sent, and the previous contents come back.
 pub(crate) struct Paste {
@@ -53,11 +69,15 @@ impl Insertion for Paste {
 pub(crate) fn start(config: &InsertionConfig, token_file: Option<PathBuf>) -> io::Result<Paste> {
     let restore_timeout = config.restore_timeout;
     let (woken, wake) = io::pipe()?;
+    let desktop = Kde {
+        woken,
+        wake: wake.try_clone()?,
+    };
     let (texts, received) = mpsc::channel();
     thread::Builder::new()
         .name("insertion".to_owned())
         .spawn(move || {
-            let worker = Worker::new(Kde { woken }, restore_timeout, token_file);
+            let worker = Worker::new(desktop, restore_timeout, token_file);
             run(worker, &received);
         })?;
     Ok(Paste {
@@ -69,7 +89,7 @@ pub(crate) fn start(config: &InsertionConfig, token_file: Option<PathBuf>) -> io
 /// Opens the clipboard and the remote control session at the start, where the portal asks
 /// or notifies; a final text that ends before both are open is not inserted, as the focus
 /// may have moved on by then.
-fn run(mut worker: Worker<Kde>, texts: &Receiver<String>) {
+fn run<D: Desktop>(mut worker: Worker<D>, texts: &Receiver<String>) {
     if let Err(error) = worker.open() {
         platform::cannot_insert(error);
         return;
@@ -92,11 +112,8 @@ fn run(mut worker: Worker<Kde>, texts: &Receiver<String>) {
             )),
         }
         for text in texts.try_iter() {
-            if let Err(error) = worker.insert(&text) {
-                log::eprint(format_args!(
-                    "cannot insert this final text at the cursor: {error}; it reaches only \
-                     toggle's output, and the next dictation tries again"
-                ));
+            for trouble in worker.insert(&text) {
+                log::eprint(format_args!("{trouble}"));
             }
         }
     }
@@ -110,10 +127,8 @@ trait Selections {
         contents: Arc<Snapshot>,
     ) -> Result<(), ClipboardError>;
     fn clear(&mut self, selection: Selection) -> Result<(), ClipboardError>;
-    /// Waits until the compositor has handled every request sent so far.
     fn sync(&mut self) -> Result<(), ClipboardError>;
     fn offers(&self, selection: Selection, contents: &Arc<Snapshot>) -> bool;
-    /// The reads of offered contents since the last call, by type and time.
     fn take_reads(&mut self) -> Vec<(String, Instant)>;
 }
 
@@ -121,16 +136,23 @@ trait PasteKey {
     fn press(&mut self) -> Result<(), KeyboardError>;
 }
 
+struct Opened<K> {
+    keyboard: K,
+    new_token: Option<String>,
+}
+
 trait Desktop {
     type Clipboard: Selections;
     type Keyboard: PasteKey;
 
     fn connect_clipboard(&mut self) -> Result<Self::Clipboard, ClipboardError>;
-    /// Opens a remote control session, and returns the token that restores it next time.
+    /// Opens a remote control session, serving the clipboard while the portal may wait for
+    /// the user.
     fn open_keyboard(
         &mut self,
         token: Option<&str>,
-    ) -> Result<(Self::Keyboard, Option<String>), PasteError>;
+        clipboard: &mut Self::Clipboard,
+    ) -> Result<Opened<Self::Keyboard>, PasteError>;
     /// Waits for the compositor, the input emulation or a new final text, at most until the
     /// deadline, and handles what arrived.
     fn wait(
@@ -149,6 +171,9 @@ struct Worker<D: Desktop> {
     token_file: Option<PathBuf>,
     clipboard: Option<D::Clipboard>,
     keyboard: Option<D::Keyboard>,
+    /// Set once the user ended or denied the session, so that the next one asks instead of
+    /// restoring the permission with the token.
+    ask_again: bool,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -159,6 +184,7 @@ impl<D: Desktop> Worker<D> {
             token_file,
             clipboard: None,
             keyboard: None,
+            ask_again: false,
         }
     }
 
@@ -171,11 +197,18 @@ impl<D: Desktop> Worker<D> {
         let keyboard = if let Some(keyboard) = self.keyboard.take() {
             keyboard
         } else {
-            let token = self
-                .token_file
-                .as_deref()
-                .and_then(remote_desktop::read_token);
-            let (keyboard, new_token) = self.desktop.open_keyboard(token.as_deref())?;
+            let token = if self.ask_again {
+                None
+            } else {
+                self.token_file
+                    .as_deref()
+                    .and_then(remote_desktop::read_token)
+            };
+            let Opened {
+                keyboard,
+                new_token,
+            } = self.desktop.open_keyboard(token.as_deref(), clipboard)?;
+            self.ask_again = false;
             keep_token(self.token_file.as_deref(), new_token);
             keyboard
         };
@@ -183,17 +216,26 @@ impl<D: Desktop> Worker<D> {
         Ok((&mut self.desktop, clipboard, keyboard))
     }
 
-    fn insert(&mut self, text: &str) -> Result<(), PasteError> {
+    fn insert(&mut self, text: &str) -> Vec<Trouble> {
         let Some(text) = contents::pasteable(text) else {
-            return Ok(());
+            return Vec::new();
         };
         let timeout = self.restore_timeout;
-        let (desktop, clipboard, keyboard) = self.open()?;
-        let errors = paste(desktop, clipboard, keyboard, &text, timeout);
-        for error in &errors {
-            self.forget_what_failed(error);
+        let troubles = match self.open() {
+            Ok((desktop, clipboard, keyboard)) => {
+                paste(desktop, clipboard, keyboard, &text, timeout)
+            }
+            Err(error) => vec![Trouble::NotPasted(error)],
+        };
+        for trouble in &troubles {
+            match trouble {
+                Trouble::NotPasted(error) | Trouble::AfterTheKey(error) => {
+                    self.forget_what_failed(error);
+                }
+                Trouble::NotRestored(..) => self.clipboard = None,
+            }
         }
-        errors.into_iter().next().map_or(Ok(()), Err)
+        troubles
     }
 
     fn idle(&mut self) -> Result<(), PasteError> {
@@ -209,6 +251,11 @@ impl<D: Desktop> Worker<D> {
     fn forget_what_failed(&mut self, error: &PasteError) {
         match error {
             PasteError::Clipboard(_) => self.clipboard = None,
+            PasteError::Keyboard(KeyboardError::Ended(_))
+            | PasteError::Portal(PortalError::Denied) => {
+                self.keyboard = None;
+                self.ask_again = true;
+            }
             PasteError::Keyboard(error) if error.ends_the_session() => self.keyboard = None,
             PasteError::Keyboard(_) | PasteError::Portal(_) | PasteError::Wait(_) => {}
         }
@@ -227,17 +274,17 @@ fn keep_token(path: Option<&Path>, token: Option<String>) {
 }
 
 /// Pastes the text and puts back what each selection held, wherever the final text still
-/// stands; the errors come in the order they happened.
+/// stands; the troubles come in the order they happened.
 fn paste<D: Desktop>(
     desktop: &mut D,
     clipboard: &mut D::Clipboard,
     keyboard: &mut D::Keyboard,
     text: &str,
     timeout: Duration,
-) -> Vec<PasteError> {
+) -> Vec<Trouble> {
     let previous = match snapshots(clipboard) {
         Ok(previous) => previous,
-        Err(error) => return vec![error.into()],
+        Err(error) => return vec![Trouble::NotPasted(error.into())],
     };
     for (selection, previous) in SELECTIONS.iter().zip(&previous) {
         if let Previous::Kept { lost, .. } = previous {
@@ -249,19 +296,21 @@ fn paste<D: Desktop>(
         }
     }
     let offered = Arc::new(contents::final_text(text));
-    let mut errors: Vec<PasteError> =
-        offer_and_press(desktop, clipboard, keyboard, &offered, timeout)
-            .err()
+    let mut troubles = match offer_and_press(clipboard, keyboard, &offered) {
+        Ok(()) => wait_for_the_read(desktop, clipboard, keyboard, timeout)
             .into_iter()
-            .collect();
+            .map(Trouble::AfterTheKey)
+            .collect(),
+        Err(error) => vec![Trouble::NotPasted(error)],
+    };
     for (selection, previous) in SELECTIONS.into_iter().zip(previous) {
         if clipboard.offers(selection, &offered)
             && let Err(error) = restore(clipboard, selection, previous)
         {
-            errors.push(error.into());
+            troubles.push(Trouble::NotRestored(selection, error));
         }
     }
-    errors
+    troubles
 }
 
 fn snapshots(clipboard: &mut impl Selections) -> Result<[Previous; 2], ClipboardError> {
@@ -271,12 +320,10 @@ fn snapshots(clipboard: &mut impl Selections) -> Result<[Previous; 2], Clipboard
     ])
 }
 
-fn offer_and_press<D: Desktop>(
-    desktop: &mut D,
-    clipboard: &mut D::Clipboard,
-    keyboard: &mut D::Keyboard,
+fn offer_and_press(
+    clipboard: &mut impl Selections,
+    keyboard: &mut impl PasteKey,
     offered: &Arc<Snapshot>,
-    timeout: Duration,
 ) -> Result<(), PasteError> {
     for selection in SELECTIONS {
         clipboard.offer(selection, Arc::clone(offered))?;
@@ -284,6 +331,19 @@ fn offer_and_press<D: Desktop>(
     clipboard.sync()?;
     clipboard.take_reads();
     keyboard.press()?;
+    Ok(())
+}
+
+/// Serves the final text until the restore is due; once the key is sent, a failed input
+/// emulation does not cut this short, as the window may still be reading the text.
+fn wait_for_the_read<D: Desktop>(
+    desktop: &mut D,
+    clipboard: &mut D::Clipboard,
+    keyboard: &mut D::Keyboard,
+    timeout: Duration,
+) -> Vec<PasteError> {
+    let mut errors = Vec::new();
+    let mut keyboard = Some(keyboard);
     let mut clock = RestoreClock::started(Instant::now(), timeout);
     loop {
         for (mime, at) in clipboard.take_reads() {
@@ -291,13 +351,19 @@ fn offer_and_press<D: Desktop>(
         }
         let restore_at = clock.restore_at();
         if Instant::now() >= restore_at {
-            return Ok(());
+            return errors;
         }
-        desktop.wait(
+        if let Err(error) = desktop.wait(
             Some(&mut *clipboard),
-            Some(&mut *keyboard),
+            keyboard.as_deref_mut(),
             Some(restore_at),
-        )?;
+        ) {
+            let clipboard_failed = matches!(error, PasteError::Clipboard(_));
+            errors.push(error);
+            if clipboard_failed || keyboard.take().is_none() {
+                return errors;
+            }
+        }
     }
 }
 
@@ -352,6 +418,45 @@ impl PasteKey for Keyboard {
 
 struct Kde {
     woken: PipeReader,
+    wake: PipeWriter,
+}
+
+impl Kde {
+    /// Starts the session on a thread of its own, as the portal may wait for the user's
+    /// answer, and serves the clipboard meanwhile.
+    fn start_session(
+        &mut self,
+        token: Option<&str>,
+        clipboard: &mut Clipboard,
+    ) -> Result<Started, PasteError> {
+        let (sender, started) = mpsc::channel();
+        let token = token.map(str::to_owned);
+        let mut wake = self.wake.try_clone()?;
+        thread::Builder::new()
+            .name("remote-desktop".to_owned())
+            .spawn(move || {
+                let _ = sender.send(remote_desktop::start(token.as_deref()));
+                let _ = wake.write(&[1]);
+            })?;
+        let mut clipboard = Some(clipboard);
+        loop {
+            match started.try_recv() {
+                Ok(started) => return started.map_err(PasteError::from),
+                Err(TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => {}
+            }
+            // A clipboard that fails here fails again at its next use, where that is said.
+            if self.wait(clipboard.as_deref_mut(), None, None).is_err()
+                && clipboard.take().is_none()
+            {
+                break;
+            }
+        }
+        started
+            .recv()
+            .map_err(|_| io::Error::other("the remote control session's start gave no answer"))?
+            .map_err(PasteError::from)
+    }
 }
 
 impl Desktop for Kde {
@@ -365,9 +470,13 @@ impl Desktop for Kde {
     fn open_keyboard(
         &mut self,
         token: Option<&str>,
-    ) -> Result<(Keyboard, Option<String>), PasteError> {
-        let Started { session, new_token } = remote_desktop::start(token)?;
-        Ok((Keyboard::connect(session)?, new_token))
+        clipboard: &mut Clipboard,
+    ) -> Result<Opened<Keyboard>, PasteError> {
+        let Started { session, new_token } = self.start_session(token, clipboard)?;
+        Ok(Opened {
+            keyboard: Keyboard::connect(session)?,
+            new_token,
+        })
     }
 
     fn wait(
@@ -422,13 +531,15 @@ impl Desktop for Kde {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::io;
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
+    use std::sync::mpsc::{self, Sender};
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{Desktop, PasteError, PasteKey, Selections, Worker};
+    use super::{Desktop, Opened, PasteError, PasteKey, Selections, Trouble, Worker, run};
     use crate::platform::contents::{Lost, Previous, Snapshot};
     use crate::platform::data_control::{ClipboardError, Selection};
     use crate::platform::keyboard::KeyboardError;
@@ -439,6 +550,7 @@ mod tests {
     enum Failure {
         Clipboard,
         SessionEnded,
+        EndedByTheUser,
         Paused,
         Denied,
     }
@@ -447,6 +559,7 @@ mod tests {
         fn keyboard(self) -> KeyboardError {
             match self {
                 Self::Paused => KeyboardError::Paused,
+                Self::EndedByTheUser => KeyboardError::Ended(None),
                 _ => KeyboardError::Disconnected(None),
             }
         }
@@ -455,7 +568,7 @@ mod tests {
             match self {
                 Self::Clipboard => ClipboardError::Finished.into(),
                 Self::Denied => PortalError::Denied.into(),
-                Self::SessionEnded | Self::Paused => self.keyboard().into(),
+                Self::SessionEnded | Self::EndedByTheUser | Self::Paused => self.keyboard().into(),
             }
         }
     }
@@ -466,6 +579,8 @@ mod tests {
         failing: Vec<(String, Failure)>,
         taken_during_the_wait: Option<Selection>,
         tokens: Vec<&'static str>,
+        /// Under `run`: the final text each wait between dictations brings, until none is left.
+        dictations: Option<(Sender<String>, Vec<&'static str>)>,
     }
 
     impl Script {
@@ -489,6 +604,7 @@ mod tests {
             failing: Vec::new(),
             taken_during_the_wait: None,
             tokens: Vec::new(),
+            dictations: None,
         }))
     }
 
@@ -498,6 +614,13 @@ mod tests {
 
     fn happened(script: &Shared) -> Vec<String> {
         script.borrow().happened.clone()
+    }
+
+    fn opened(script: &Shared) -> Vec<String> {
+        happened(script)
+            .into_iter()
+            .filter(|step| step.starts_with("connect") || step.starts_with("open"))
+            .collect()
     }
 
     fn text(text: &str) -> Previous {
@@ -515,6 +638,29 @@ mod tests {
             Duration::from_millis(5),
             token_file,
         )
+    }
+
+    fn saved_token(dir: &TempDir, token: &str) -> PathBuf {
+        let token_file = dir.path().join("state/copper-dictate/remote-desktop-token");
+        remote_desktop::write_token(&token_file, token).unwrap();
+        token_file
+    }
+
+    #[track_caller]
+    fn inserted(worker: &mut Worker<FakeDesktop>, text: &str) {
+        let troubles = worker.insert(text);
+        assert!(troubles.is_empty(), "{troubles:?}");
+    }
+
+    /// Runs the insertion's loop over these dictations, the first of them queued before it
+    /// starts.
+    fn run_dictations(script: &Shared, early: &[&str], dictations: Vec<&'static str>) {
+        let (texts, received) = mpsc::channel();
+        for text in early {
+            texts.send((*text).to_owned()).unwrap();
+        }
+        script.borrow_mut().dictations = Some((texts, dictations));
+        run(worker(script, None), &received);
     }
 
     struct FakeDesktop(Shared);
@@ -544,7 +690,8 @@ mod tests {
         fn open_keyboard(
             &mut self,
             token: Option<&str>,
-        ) -> Result<(FakeKeyboard, Option<String>), PasteError> {
+            _clipboard: &mut FakeClipboard,
+        ) -> Result<Opened<FakeKeyboard>, PasteError> {
             let mut script = self.0.borrow_mut();
             script
                 .step(token.map_or_else(
@@ -553,25 +700,37 @@ mod tests {
                 ))
                 .map_err(Failure::paste)?;
             let new_token = (!script.tokens.is_empty()).then(|| script.tokens.remove(0).to_owned());
-            Ok((FakeKeyboard(Rc::clone(&self.0)), new_token))
+            Ok(Opened {
+                keyboard: FakeKeyboard(Rc::clone(&self.0)),
+                new_token,
+            })
         }
 
         fn wait(
             &mut self,
             clipboard: Option<&mut FakeClipboard>,
-            _keyboard: Option<&mut FakeKeyboard>,
+            keyboard: Option<&mut FakeKeyboard>,
             until: Option<Instant>,
         ) -> Result<(), PasteError> {
+            let script = &mut *self.0.borrow_mut();
             let Some(until) = until else {
-                return self
-                    .0
-                    .borrow_mut()
+                if let Some((texts, dictations)) = &mut script.dictations {
+                    if dictations.is_empty() {
+                        return Err(io::Error::other("no dictation left").into());
+                    }
+                    texts.send(dictations.remove(0).to_owned()).unwrap();
+                }
+                return script
                     .step("wait between dictations".to_owned())
                     .map_err(Failure::paste);
             };
-            let mut script = self.0.borrow_mut();
-            if script.happened.last().is_none_or(|last| last != "wait") {
-                script.step("wait".to_owned()).map_err(Failure::paste)?;
+            let step = if keyboard.is_some() {
+                "wait"
+            } else {
+                "wait for the clipboard alone"
+            };
+            if script.happened.last().is_none_or(|last| last != step) {
+                script.step(step.to_owned()).map_err(Failure::paste)?;
             }
             if let (Some(selection), Some(clipboard)) =
                 (script.taken_during_the_wait.take(), clipboard)
@@ -581,7 +740,6 @@ mod tests {
                     .happened
                     .push(format!("someone else sets the {selection}"));
             }
-            drop(script);
             thread::sleep(until.saturating_duration_since(Instant::now()));
             Ok(())
         }
@@ -663,7 +821,7 @@ mod tests {
     fn the_final_text_is_offered_on_both_selections_pasted_and_the_previous_contents_come_back() {
         let script = script([text("copied"), text("selected")]);
 
-        worker(&script, None).insert("Grüße").unwrap();
+        inserted(&mut worker(&script, None), "Grüße");
 
         assert_eq!(
             happened(&script),
@@ -687,9 +845,7 @@ mod tests {
     fn the_final_text_is_offered_without_line_breaks_and_escape_sequences() {
         let script = script([Previous::Empty, Previous::Empty]);
 
-        worker(&script, None)
-            .insert("eins\nzwei\u{1b}[201~\r\n")
-            .unwrap();
+        inserted(&mut worker(&script, None), "eins\nzwei\u{1b}[201~\r\n");
 
         assert!(
             happened(&script).contains(&"offer the clipboard: eins zwei[201~ ".to_owned()),
@@ -702,21 +858,26 @@ mod tests {
     fn a_final_text_of_whitespace_alone_is_not_pasted() {
         let script = script([text("copied"), text("selected")]);
 
-        worker(&script, None).insert(" \n\t ").unwrap();
+        inserted(&mut worker(&script, None), " \n\t ");
 
         assert_eq!(happened(&script), Vec::<String>::new());
     }
 
     #[test]
-    fn when_the_key_fails_the_previous_contents_still_come_back() {
+    fn when_the_key_fails_the_previous_contents_come_back_at_once() {
         let script = script([text("copied"), text("selected")]);
         failing(&script, "press Shift+Insert", Failure::Paused);
 
-        let inserted = worker(&script, None).insert("lost");
+        let troubles = worker(&script, None).insert("lost");
 
         assert!(
-            matches!(inserted, Err(PasteError::Keyboard(KeyboardError::Paused))),
-            "{inserted:?}"
+            matches!(
+                troubles[..],
+                [Trouble::NotPasted(PasteError::Keyboard(
+                    KeyboardError::Paused
+                ))]
+            ),
+            "{troubles:?}"
         );
         assert_eq!(
             happened(&script)[7..],
@@ -729,18 +890,45 @@ mod tests {
     }
 
     #[test]
-    fn when_the_wait_fails_the_previous_contents_still_come_back() {
+    fn a_session_lost_after_the_key_leaves_the_final_text_on_offer_until_the_restore() {
         let script = script([text("copied"), text("selected")]);
         failing(&script, "wait", Failure::SessionEnded);
 
-        let inserted = worker(&script, None).insert("lost");
+        let troubles = worker(&script, None).insert("pasted");
 
         assert!(
             matches!(
-                inserted,
-                Err(PasteError::Keyboard(KeyboardError::Disconnected(None)))
+                troubles[..],
+                [Trouble::AfterTheKey(PasteError::Keyboard(
+                    KeyboardError::Disconnected(None)
+                ))]
             ),
-            "{inserted:?}"
+            "{troubles:?}"
+        );
+        assert_eq!(
+            happened(&script)[8..],
+            [
+                "wait",
+                "wait for the clipboard alone",
+                "offer the clipboard: copied",
+                "offer the primary selection: selected",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clipboard_that_fails_after_the_key_gets_the_previous_contents_back_at_once() {
+        let script = script([text("copied"), text("selected")]);
+        failing(&script, "wait", Failure::Clipboard);
+
+        let troubles = worker(&script, None).insert("pasted");
+
+        assert!(
+            matches!(
+                troubles[..],
+                [Trouble::AfterTheKey(PasteError::Clipboard(_))]
+            ),
+            "{troubles:?}"
         );
         assert_eq!(
             happened(&script)[8..],
@@ -761,11 +949,11 @@ mod tests {
             Failure::Clipboard,
         );
 
-        let inserted = worker(&script, None).insert("lost");
+        let troubles = worker(&script, None).insert("lost");
 
         assert!(
-            matches!(inserted, Err(PasteError::Clipboard(_))),
-            "{inserted:?}"
+            matches!(troubles[..], [Trouble::NotPasted(PasteError::Clipboard(_))]),
+            "{troubles:?}"
         );
         assert_eq!(
             happened(&script)[4..],
@@ -778,11 +966,69 @@ mod tests {
     }
 
     #[test]
+    fn every_failure_of_one_insertion_is_told_and_only_the_failed_parts_are_opened_again() {
+        let script = script([text("copied"), text("selected")]);
+        failing(&script, "press Shift+Insert", Failure::Paused);
+        failing(&script, "offer the clipboard: copied", Failure::Clipboard);
+        let mut worker = worker(&script, None);
+
+        let troubles = worker.insert("lost");
+        let after_the_first = happened(&script);
+        inserted(&mut worker, "pasted");
+
+        assert!(
+            matches!(
+                troubles[..],
+                [
+                    Trouble::NotPasted(PasteError::Keyboard(KeyboardError::Paused)),
+                    Trouble::NotRestored(Selection::Clipboard, _),
+                ]
+            ),
+            "{troubles:?}"
+        );
+        assert_eq!(
+            after_the_first[8..],
+            [
+                "offer the clipboard: copied",
+                "offer the primary selection: selected",
+            ]
+        );
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session without a token",
+                "connect the clipboard",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_failure_says_whether_the_paste_key_was_sent() {
+        let failed = || PasteError::from(KeyboardError::Paused);
+
+        let not_pasted = Trouble::NotPasted(failed()).to_string();
+        let after_the_key = Trouble::AfterTheKey(failed()).to_string();
+        let not_restored =
+            Trouble::NotRestored(Selection::Primary, ClipboardError::Finished).to_string();
+
+        assert!(not_pasted.starts_with("cannot insert"), "{not_pasted}");
+        assert!(
+            after_the_key.starts_with("the paste key was sent"),
+            "{after_the_key}"
+        );
+        assert!(
+            not_restored.starts_with("the primary selection's previous contents"),
+            "{not_restored}"
+        );
+    }
+
+    #[test]
     fn a_selection_someone_else_sets_during_the_wait_is_left_alone() {
         let script = script([text("copied"), text("selected")]);
         script.borrow_mut().taken_during_the_wait = Some(Selection::Clipboard);
 
-        worker(&script, None).insert("pasted").unwrap();
+        inserted(&mut worker(&script, None), "pasted");
 
         assert_eq!(
             happened(&script)[8..],
@@ -798,7 +1044,7 @@ mod tests {
     fn contents_marked_as_a_password_are_not_restored_and_leave_the_selection_empty() {
         let script = script([Previous::Secret, Previous::Empty]);
 
-        worker(&script, None).insert("pasted").unwrap();
+        inserted(&mut worker(&script, None), "pasted");
 
         assert_eq!(
             happened(&script)[8..],
@@ -818,7 +1064,7 @@ mod tests {
             text("selected"),
         ]);
 
-        worker(&script, None).insert("pasted").unwrap();
+        inserted(&mut worker(&script, None), "pasted");
 
         assert_eq!(
             happened(&script)[8..],
@@ -836,17 +1082,11 @@ mod tests {
         failing(&script, "press Shift+Insert", Failure::Paused);
         let mut worker = worker(&script, None);
 
-        assert!(worker.insert("first").is_err());
-        worker.insert("second").unwrap();
+        assert!(!worker.insert("first").is_empty());
+        inserted(&mut worker, "second");
 
+        assert_eq!(opened(&script), OPENED);
         let happened = happened(&script);
-        assert_eq!(
-            happened
-                .iter()
-                .filter(|step| step.starts_with("connect") || step.starts_with("open"))
-                .collect::<Vec<_>>(),
-            OPENED
-        );
         assert!(
             happened.contains(&"offer the clipboard: second".to_owned()),
             "{happened:?}"
@@ -866,15 +1106,11 @@ mod tests {
         failing(&script, "press Shift+Insert", Failure::SessionEnded);
         let mut worker = worker(&script, Some(token_file.clone()));
 
-        assert!(worker.insert("lost").is_err());
-        worker.insert("pasted").unwrap();
+        assert!(!worker.insert("lost").is_empty());
+        inserted(&mut worker, "pasted");
 
-        let happened = happened(&script);
         assert_eq!(
-            happened
-                .iter()
-                .filter(|step| step.starts_with("connect") || step.starts_with("open"))
-                .collect::<Vec<_>>(),
+            opened(&script),
             [
                 "connect the clipboard",
                 "open a session without a token",
@@ -882,12 +1118,72 @@ mod tests {
             ]
         );
         assert!(
-            happened.contains(&"offer the clipboard: pasted".to_owned()),
-            "{happened:?}"
+            happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
+            "{:?}",
+            happened(&script)
         );
         assert_eq!(
             remote_desktop::read_token(&token_file).as_deref(),
             Some("second")
+        );
+    }
+
+    #[test]
+    fn after_the_user_ended_the_session_the_next_dictation_asks_again_and_later_ones_restore_it() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        script.borrow_mut().tokens = vec!["first", "second"];
+        failing(&script, "wait between dictations", Failure::EndedByTheUser);
+        failing(&script, "wait between dictations", Failure::SessionEnded);
+        let mut worker = worker(&script, Some(token_file));
+        worker.open().unwrap();
+
+        assert!(worker.idle().is_err());
+        inserted(&mut worker, "asked");
+        assert!(worker.idle().is_err());
+        inserted(&mut worker, "restored");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session without a token",
+                "open a session with the token second",
+            ]
+        );
+    }
+
+    #[test]
+    fn after_the_user_denied_the_session_the_next_dictation_asks_again() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(
+            &script,
+            "open a session with the token saved",
+            Failure::Denied,
+        );
+        let mut worker = worker(&script, Some(token_file));
+
+        let troubles = worker.insert("lost");
+        inserted(&mut worker, "pasted");
+
+        assert!(
+            matches!(
+                troubles[..],
+                [Trouble::NotPasted(PasteError::Portal(PortalError::Denied))]
+            ),
+            "{troubles:?}"
+        );
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session without a token",
+            ]
         );
     }
 
@@ -899,7 +1195,7 @@ mod tests {
         worker.open().unwrap();
 
         assert!(worker.idle().is_err());
-        worker.insert("pasted").unwrap();
+        inserted(&mut worker, "pasted");
 
         assert_eq!(
             happened(&script)[..5],
@@ -919,15 +1215,11 @@ mod tests {
         failing(&script, "sync", Failure::Clipboard);
         let mut worker = worker(&script, None);
 
-        assert!(worker.insert("lost").is_err());
-        worker.insert("pasted").unwrap();
+        assert!(!worker.insert("lost").is_empty());
+        inserted(&mut worker, "pasted");
 
-        let happened = happened(&script);
         assert_eq!(
-            happened
-                .iter()
-                .filter(|step| step.starts_with("connect") || step.starts_with("open"))
-                .collect::<Vec<_>>(),
+            opened(&script),
             [
                 "connect the clipboard",
                 "open a session without a token",
@@ -935,8 +1227,9 @@ mod tests {
             ]
         );
         assert!(
-            happened.contains(&"offer the clipboard: pasted".to_owned()),
-            "{happened:?}"
+            happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
+            "{:?}",
+            happened(&script)
         );
     }
 
@@ -948,10 +1241,13 @@ mod tests {
 
         let first = worker.insert("lost");
         let after_the_first = happened(&script);
-        worker.insert("pasted").unwrap();
+        inserted(&mut worker, "pasted");
 
         assert!(
-            matches!(first, Err(PasteError::Portal(PortalError::Denied))),
+            matches!(
+                first[..],
+                [Trouble::NotPasted(PasteError::Portal(PortalError::Denied))]
+            ),
             "{first:?}"
         );
         assert_eq!(after_the_first, OPENED);
@@ -960,5 +1256,68 @@ mod tests {
             "{:?}",
             happened(&script)
         );
+    }
+
+    #[test]
+    fn a_failed_insertion_leaves_the_next_dictation_to_be_inserted() {
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "press Shift+Insert", Failure::Paused);
+
+        run_dictations(&script, &[], vec!["lost", "pasted"]);
+
+        assert!(
+            happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
+            "{:?}",
+            happened(&script)
+        );
+    }
+
+    #[test]
+    fn a_session_lost_between_dictations_is_opened_again_for_the_next_one() {
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "wait between dictations", Failure::SessionEnded);
+
+        run_dictations(&script, &[], vec!["pasted"]);
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session without a token",
+                "open a session without a token",
+            ]
+        );
+        assert!(
+            happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
+            "{:?}",
+            happened(&script)
+        );
+    }
+
+    #[test]
+    fn a_final_text_that_ends_before_the_insertion_is_ready_is_not_inserted() {
+        let script = script([Previous::Empty, Previous::Empty]);
+
+        run_dictations(&script, &["early"], vec!["pasted"]);
+
+        let happened = happened(&script);
+        assert!(
+            !happened.contains(&"offer the clipboard: early".to_owned()),
+            "{happened:?}"
+        );
+        assert!(
+            happened.contains(&"offer the clipboard: pasted".to_owned()),
+            "{happened:?}"
+        );
+    }
+
+    #[test]
+    fn an_insertion_that_cannot_start_inserts_no_dictation() {
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "open a session without a token", Failure::Denied);
+
+        run_dictations(&script, &[], vec!["lost"]);
+
+        assert_eq!(happened(&script), OPENED);
     }
 }

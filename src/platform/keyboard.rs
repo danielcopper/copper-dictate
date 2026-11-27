@@ -4,7 +4,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use reis::PendingRequestResult;
-use reis::ei::{self, handshake::ContextType, keyboard::KeyState};
+use reis::ei::{self, connection::DisconnectReason, handshake::ContextType, keyboard::KeyState};
 use reis::event::{self, DeviceCapability, EiEvent, EiEventConverter};
 use reis::handshake::{EiHandshaker, HandshakeError, HandshakeResp};
 use rustix::event::{PollFd, PollFlags};
@@ -28,9 +28,11 @@ pub(crate) enum KeyboardError {
     Event(#[from] event::EventError),
     #[error("the input emulation's message is not understood: {0}")]
     Parse(String),
+    #[error("the desktop ended the remote control session ({})", .0.as_deref().unwrap_or("no reason given"))]
+    Ended(Option<String>),
     #[error("the compositor ended the input emulation ({})", .0.as_deref().unwrap_or("no reason given"))]
     Disconnected(Option<String>),
-    #[error("the compositor did not set the input emulation up within 5 s")]
+    #[error("the compositor did not set the input emulation up within {} s", CONNECT_TIMEOUT.as_secs())]
     NoAnswer,
     #[error("the compositor offers no emulated keyboard")]
     NoKeyboard,
@@ -158,9 +160,7 @@ impl Keyboard {
                 self.device = None;
                 self.resumed = false;
             }
-            EiEvent::Disconnected(disconnected) => {
-                return Err(KeyboardError::Disconnected(disconnected.explanation));
-            }
+            EiEvent::Disconnected(disconnected) => return Err(lost(disconnected)),
             _ => {}
         }
         Ok(())
@@ -203,6 +203,15 @@ fn handshake(context: &ei::Context, deadline: Instant) -> Result<HandshakeResp, 
     }
 }
 
+/// A disconnect on purpose is how the compositor ends the input emulation when the portal
+/// closes the session; any other reason is a failure.
+fn lost(disconnected: event::Disconnected) -> KeyboardError {
+    match disconnected.reason {
+        DisconnectReason::Disconnected => KeyboardError::Ended(disconnected.explanation),
+        _ => KeyboardError::Disconnected(disconnected.explanation),
+    }
+}
+
 fn read(context: &ei::Context) -> Result<(), KeyboardError> {
     match context.read() {
         Ok(_) => Ok(()),
@@ -219,4 +228,43 @@ fn now_in_microseconds() -> u64 {
     let seconds = u64::try_from(now.tv_sec).unwrap_or_default();
     let micros = u64::try_from(now.tv_nsec / 1000).unwrap_or_default();
     seconds * 1_000_000 + micros
+}
+
+#[cfg(test)]
+mod tests {
+    use reis::ei::connection::DisconnectReason;
+    use reis::event::Disconnected;
+
+    use super::{KeyboardError, lost};
+
+    fn disconnected(reason: DisconnectReason) -> Disconnected {
+        Disconnected {
+            last_serial: 0,
+            reason,
+            explanation: Some("why".to_owned()),
+        }
+    }
+
+    #[test]
+    fn a_disconnect_on_purpose_ends_the_session_and_any_other_is_a_failure() {
+        assert!(matches!(
+            lost(disconnected(DisconnectReason::Disconnected)),
+            KeyboardError::Ended(Some(why)) if why == "why"
+        ));
+        for reason in [
+            DisconnectReason::Error,
+            DisconnectReason::Mode,
+            DisconnectReason::Protocol,
+            DisconnectReason::Value,
+            DisconnectReason::Transport,
+        ] {
+            assert!(
+                matches!(
+                    lost(disconnected(reason)),
+                    KeyboardError::Disconnected(Some(_))
+                ),
+                "{reason:?}"
+            );
+        }
+    }
 }
