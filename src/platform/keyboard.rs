@@ -28,8 +28,9 @@ pub(crate) enum KeyboardError {
     Event(#[from] event::EventError),
     #[error("the input emulation's message is not understood: {0}")]
     Parse(String),
-    #[error("the desktop ended the remote control session ({})", .0.as_deref().unwrap_or("no reason given"))]
-    Ended(Option<String>),
+    /// Both the portal's "End" and a restart of the portal arrive this way.
+    #[error("the compositor ended the remote control session on purpose ({})", .0.as_deref().unwrap_or("no reason given"))]
+    EndedOnPurpose(Option<String>),
     #[error("the compositor ended the input emulation ({})", .0.as_deref().unwrap_or("no reason given"))]
     Disconnected(Option<String>),
     #[error("the compositor did not set the input emulation up within {} s", CONNECT_TIMEOUT.as_secs())]
@@ -203,11 +204,10 @@ fn handshake(context: &ei::Context, deadline: Instant) -> Result<HandshakeResp, 
     }
 }
 
-/// A disconnect on purpose is how the compositor ends the input emulation when the portal
-/// closes the session; any other reason is a failure.
+/// Only a disconnect on purpose ends the session; any other reason is a failure.
 fn lost(disconnected: event::Disconnected) -> KeyboardError {
     match disconnected.reason {
-        DisconnectReason::Disconnected => KeyboardError::Ended(disconnected.explanation),
+        DisconnectReason::Disconnected => KeyboardError::EndedOnPurpose(disconnected.explanation),
         _ => KeyboardError::Disconnected(disconnected.explanation),
     }
 }
@@ -249,7 +249,7 @@ mod tests {
     fn a_disconnect_on_purpose_ends_the_session_and_any_other_is_a_failure() {
         assert!(matches!(
             lost(disconnected(DisconnectReason::Disconnected)),
-            KeyboardError::Ended(Some(why)) if why == "why"
+            KeyboardError::EndedOnPurpose(Some(why)) if why == "why"
         ));
         for reason in [
             DisconnectReason::Error,

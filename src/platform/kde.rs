@@ -1,5 +1,5 @@
 use std::io::{self, PipeReader, PipeWriter, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
@@ -14,7 +14,7 @@ use crate::platform;
 use crate::platform::contents::{self, Previous, RestoreClock, Snapshot};
 use crate::platform::data_control::{Clipboard, ClipboardError, Incoming, SELECTIONS, Selection};
 use crate::platform::keyboard::{Keyboard, KeyboardError};
-use crate::platform::remote_desktop::{self, PortalError, Started};
+use crate::platform::remote_desktop::{self, PortalError, RemoteDesktop, Started};
 use crate::session::Insertion;
 
 #[derive(Debug, Error)]
@@ -27,6 +27,17 @@ enum PasteError {
     Keyboard(#[from] KeyboardError),
     #[error("waiting for the desktop failed: {0}")]
     Wait(#[from] io::Error),
+}
+
+impl PasteError {
+    /// Whether the session was ended on purpose or the permission denied, so that the next
+    /// session asks the user instead of restoring the permission.
+    fn asks_again(&self) -> bool {
+        matches!(
+            self,
+            Self::Keyboard(KeyboardError::EndedOnPurpose(_)) | Self::Portal(PortalError::Denied)
+        )
+    }
 }
 
 #[derive(Debug, Error)]
@@ -87,12 +98,18 @@ pub(crate) fn start(config: &InsertionConfig, token_file: Option<PathBuf>) -> io
 }
 
 /// Opens the clipboard and the remote control session at the start, where the portal asks
-/// or notifies; a final text that ends before both are open is not inserted, as the focus
-/// may have moved on by then.
+/// or notifies; a final text that ends meanwhile is not inserted, as the focus may have moved
+/// on by then.
 fn run<D: Desktop>(mut worker: Worker<D>, texts: &Receiver<String>) {
     if let Err(error) = worker.open() {
-        platform::cannot_insert(error);
-        return;
+        if !error.asks_again() {
+            platform::cannot_insert(error);
+            return;
+        }
+        worker.forget_what_failed(&error);
+        log::eprint(format_args!(
+            "the insertion at the cursor did not start: {error}; the next dictation asks again"
+        ));
     }
     let missed = texts.try_iter().count();
     if missed > 0 {
@@ -136,23 +153,19 @@ trait PasteKey {
     fn press(&mut self) -> Result<(), KeyboardError>;
 }
 
-struct Opened<K> {
-    keyboard: K,
-    new_token: Option<String>,
-}
+type Answer<S> = Receiver<Result<Started<S>, PortalError>>;
 
 trait Desktop {
     type Clipboard: Selections;
+    type Session;
     type Keyboard: PasteKey;
 
     fn connect_clipboard(&mut self) -> Result<Self::Clipboard, ClipboardError>;
-    /// Opens a remote control session, serving the clipboard while the portal may wait for
-    /// the user.
-    fn open_keyboard(
-        &mut self,
-        token: Option<&str>,
-        clipboard: &mut Self::Clipboard,
-    ) -> Result<Opened<Self::Keyboard>, PasteError>;
+    /// Asks the portal for a remote control session; the answer comes on the receiver and
+    /// ends a `wait`, maybe only once the user gave it.
+    fn start_session(&mut self, token: Option<&str>) -> io::Result<Answer<Self::Session>>;
+    fn connect_keyboard(&mut self, session: Self::Session)
+    -> Result<Self::Keyboard, KeyboardError>;
     /// Waits for the compositor, the input emulation or a new final text, at most until the
     /// deadline, and handles what arrived.
     fn wait(
@@ -168,12 +181,9 @@ trait Desktop {
 struct Worker<D: Desktop> {
     desktop: D,
     restore_timeout: Duration,
-    token_file: Option<PathBuf>,
+    token: SavedToken,
     clipboard: Option<D::Clipboard>,
     keyboard: Option<D::Keyboard>,
-    /// Set once the user ended or denied the session, so that the next one asks instead of
-    /// restoring the permission with the token.
-    ask_again: bool,
 }
 
 impl<D: Desktop> Worker<D> {
@@ -181,10 +191,9 @@ impl<D: Desktop> Worker<D> {
         Self {
             desktop,
             restore_timeout,
-            token_file,
+            token: SavedToken::read(token_file),
             clipboard: None,
             keyboard: None,
-            ask_again: false,
         }
     }
 
@@ -197,20 +206,11 @@ impl<D: Desktop> Worker<D> {
         let keyboard = if let Some(keyboard) = self.keyboard.take() {
             keyboard
         } else {
-            let token = if self.ask_again {
-                None
-            } else {
-                self.token_file
-                    .as_deref()
-                    .and_then(remote_desktop::read_token)
-            };
-            let Opened {
-                keyboard,
-                new_token,
-            } = self.desktop.open_keyboard(token.as_deref(), clipboard)?;
-            self.ask_again = false;
-            keep_token(self.token_file.as_deref(), new_token);
-            keyboard
+            let answer = self.desktop.start_session(self.token.get())?;
+            let Started { session, new_token } =
+                wait_for_the_session(&mut self.desktop, clipboard, &answer)?;
+            self.token.renew(new_token);
+            self.desktop.connect_keyboard(session)?
         };
         let keyboard = self.keyboard.insert(keyboard);
         Ok((&mut self.desktop, clipboard, keyboard))
@@ -249,27 +249,66 @@ impl<D: Desktop> Worker<D> {
     }
 
     fn forget_what_failed(&mut self, error: &PasteError) {
+        if error.asks_again() {
+            self.token.forget();
+        }
         match error {
             PasteError::Clipboard(_) => self.clipboard = None,
-            PasteError::Keyboard(KeyboardError::Ended(_))
-            | PasteError::Portal(PortalError::Denied) => {
-                self.keyboard = None;
-                self.ask_again = true;
-            }
             PasteError::Keyboard(error) if error.ends_the_session() => self.keyboard = None,
             PasteError::Keyboard(_) | PasteError::Portal(_) | PasteError::Wait(_) => {}
         }
     }
 }
 
-fn keep_token(path: Option<&Path>, token: Option<String>) {
-    if let (Some(path), Some(token)) = (path, token)
-        && let Err(error) = remote_desktop::write_token(path, &token)
-    {
-        log::eprint(format_args!(
-            "cannot keep the remote control permission in {}: {error}; the next start asks again",
-            path.display()
-        ));
+/// The token that restores the remote control permission, kept in a file as well, so that
+/// the daemon's next start restores it too; without one, the portal asks the user.
+struct SavedToken {
+    file: Option<PathBuf>,
+    token: Option<String>,
+}
+
+impl SavedToken {
+    fn read(file: Option<PathBuf>) -> Self {
+        let token = file.as_deref().and_then(remote_desktop::read_token);
+        Self { file, token }
+    }
+
+    fn get(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// Keeps the token an opened session brought; a session opened without one that brought
+    /// none leaves no token behind.
+    fn renew(&mut self, new_token: Option<String>) {
+        match new_token {
+            Some(token) => {
+                if let Some(file) = &self.file
+                    && let Err(error) = remote_desktop::write_token(file, &token)
+                {
+                    log::eprint(format_args!(
+                        "cannot keep the remote control permission in {}: {error}; the next \
+                         start asks again",
+                        file.display()
+                    ));
+                }
+                self.token = Some(token);
+            }
+            None if self.token.is_none() => self.forget(),
+            None => {}
+        }
+    }
+
+    fn forget(&mut self) {
+        self.token = None;
+        if let Some(file) = &self.file
+            && let Err(error) = remote_desktop::forget_token(file)
+        {
+            log::eprint(format_args!(
+                "cannot delete the remote control permission in {}: {error}; the next start \
+                 restores it without asking",
+                file.display()
+            ));
+        }
     }
 }
 
@@ -332,6 +371,30 @@ fn offer_and_press(
     clipboard.take_reads();
     keyboard.press()?;
     Ok(())
+}
+
+/// Serves the clipboard until the portal answers; once the clipboard fails, there is nothing
+/// left to serve, and the answer is waited for alone.
+fn wait_for_the_session<D: Desktop>(
+    desktop: &mut D,
+    clipboard: &mut D::Clipboard,
+    answer: &Answer<D::Session>,
+) -> Result<Started<D::Session>, PasteError> {
+    loop {
+        match answer.try_recv() {
+            Ok(started) => return started.map_err(PasteError::from),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => break,
+        }
+        // A clipboard that fails here fails again at its next use, where that is said.
+        if desktop.wait(Some(clipboard), None, None).is_err() {
+            break;
+        }
+    }
+    answer
+        .recv()
+        .map_err(|_| io::Error::other("the remote control session's start gave no answer"))?
+        .map_err(PasteError::from)
 }
 
 /// Serves the final text until the restore is due; once the key is sent, a failed input
@@ -421,15 +484,17 @@ struct Kde {
     wake: PipeWriter,
 }
 
-impl Kde {
-    /// Starts the session on a thread of its own, as the portal may wait for the user's
-    /// answer, and serves the clipboard meanwhile.
-    fn start_session(
-        &mut self,
-        token: Option<&str>,
-        clipboard: &mut Clipboard,
-    ) -> Result<Started, PasteError> {
-        let (sender, started) = mpsc::channel();
+impl Desktop for Kde {
+    type Clipboard = Clipboard;
+    type Session = RemoteDesktop;
+    type Keyboard = Keyboard;
+
+    fn connect_clipboard(&mut self) -> Result<Clipboard, ClipboardError> {
+        Clipboard::connect()
+    }
+
+    fn start_session(&mut self, token: Option<&str>) -> io::Result<Answer<RemoteDesktop>> {
+        let (sender, answer) = mpsc::channel();
         let token = token.map(str::to_owned);
         let mut wake = self.wake.try_clone()?;
         thread::Builder::new()
@@ -438,45 +503,11 @@ impl Kde {
                 let _ = sender.send(remote_desktop::start(token.as_deref()));
                 let _ = wake.write(&[1]);
             })?;
-        let mut clipboard = Some(clipboard);
-        loop {
-            match started.try_recv() {
-                Ok(started) => return started.map_err(PasteError::from),
-                Err(TryRecvError::Disconnected) => break,
-                Err(TryRecvError::Empty) => {}
-            }
-            // A clipboard that fails here fails again at its next use, where that is said.
-            if self.wait(clipboard.as_deref_mut(), None, None).is_err()
-                && clipboard.take().is_none()
-            {
-                break;
-            }
-        }
-        started
-            .recv()
-            .map_err(|_| io::Error::other("the remote control session's start gave no answer"))?
-            .map_err(PasteError::from)
-    }
-}
-
-impl Desktop for Kde {
-    type Clipboard = Clipboard;
-    type Keyboard = Keyboard;
-
-    fn connect_clipboard(&mut self) -> Result<Clipboard, ClipboardError> {
-        Clipboard::connect()
+        Ok(answer)
     }
 
-    fn open_keyboard(
-        &mut self,
-        token: Option<&str>,
-        clipboard: &mut Clipboard,
-    ) -> Result<Opened<Keyboard>, PasteError> {
-        let Started { session, new_token } = self.start_session(token, clipboard)?;
-        Ok(Opened {
-            keyboard: Keyboard::connect(session)?,
-            new_token,
-        })
+    fn connect_keyboard(&mut self, session: RemoteDesktop) -> Result<Keyboard, KeyboardError> {
+        Keyboard::connect(session)
     }
 
     fn wait(
@@ -531,7 +562,9 @@ impl Desktop for Kde {
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
+    use std::fs;
     use std::io;
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::rc::Rc;
     use std::sync::Arc;
@@ -539,39 +572,61 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use super::{Desktop, Opened, PasteError, PasteKey, Selections, Trouble, Worker, run};
+    use super::{Answer, Desktop, PasteError, PasteKey, Selections, Trouble, Worker, run};
     use crate::platform::contents::{Lost, Previous, Snapshot};
     use crate::platform::data_control::{ClipboardError, Selection};
     use crate::platform::keyboard::KeyboardError;
-    use crate::platform::remote_desktop::{self, PortalError};
+    use crate::platform::remote_desktop::{self, PortalError, Started};
     use crate::test_support::TempDir;
 
     #[derive(Debug, Clone, Copy)]
     enum Failure {
         Clipboard,
         SessionEnded,
-        EndedByTheUser,
+        EndedOnPurpose,
         Paused,
         Denied,
+        NoPortal,
+        Poll,
     }
 
     impl Failure {
         fn keyboard(self) -> KeyboardError {
             match self {
                 Self::Paused => KeyboardError::Paused,
-                Self::EndedByTheUser => KeyboardError::Ended(None),
+                Self::EndedOnPurpose => KeyboardError::EndedOnPurpose(None),
                 _ => KeyboardError::Disconnected(None),
+            }
+        }
+
+        fn portal(self) -> PortalError {
+            match self {
+                Self::Denied => PortalError::Denied,
+                Self::NoPortal => PortalError::Missing(zbus::Error::InterfaceNotFound),
+                _ => PortalError::Failed("Start"),
             }
         }
 
         fn paste(self) -> PasteError {
             match self {
                 Self::Clipboard => ClipboardError::Finished.into(),
-                Self::Denied => PortalError::Denied.into(),
-                Self::SessionEnded | Self::EndedByTheUser | Self::Paused => self.keyboard().into(),
+                Self::Denied | Self::NoPortal => self.portal().into(),
+                Self::Poll => io::Error::other("poll failed").into(),
+                Self::SessionEnded | Self::EndedOnPurpose | Self::Paused => self.keyboard().into(),
             }
         }
     }
+
+    /// When the fake portal answers a session's start.
+    #[derive(Clone, Copy)]
+    enum PortalAnswers {
+        AtOnce,
+        AtTheNextWait,
+        /// From another thread, a while after the start, whatever the waits do.
+        Late,
+    }
+
+    type Answered = Result<Started<()>, PortalError>;
 
     struct Script {
         happened: Vec<String>,
@@ -579,17 +634,24 @@ mod tests {
         failing: Vec<(String, Failure)>,
         taken_during_the_wait: Option<Selection>,
         tokens: Vec<&'static str>,
+        portal_answers: PortalAnswers,
+        /// Set from a session's start until its keyboard connects.
+        portal_waits: bool,
+        pending_answer: Option<(Sender<Answered>, Answered)>,
         /// Under `run`: the final text each wait between dictations brings, until none is left.
         dictations: Option<(Sender<String>, Vec<&'static str>)>,
     }
 
     impl Script {
-        fn step(&mut self, step: String) -> Result<(), Failure> {
-            let failure = self
-                .failing
+        fn failure(&mut self, step: &str) -> Option<Failure> {
+            self.failing
                 .iter()
-                .position(|(failing, _)| *failing == step)
-                .map(|at| self.failing.remove(at).1);
+                .position(|(failing, _)| failing == step)
+                .map(|at| self.failing.remove(at).1)
+        }
+
+        fn step(&mut self, step: String) -> Result<(), Failure> {
+            let failure = self.failure(&step);
             self.happened.push(step);
             failure.map_or(Ok(()), Err)
         }
@@ -604,6 +666,9 @@ mod tests {
             failing: Vec::new(),
             taken_during_the_wait: None,
             tokens: Vec::new(),
+            portal_answers: PortalAnswers::AtOnce,
+            portal_waits: false,
+            pending_answer: None,
             dictations: None,
         }))
     }
@@ -652,15 +717,19 @@ mod tests {
         assert!(troubles.is_empty(), "{troubles:?}");
     }
 
-    /// Runs the insertion's loop over these dictations, the first of them queued before it
-    /// starts.
-    fn run_dictations(script: &Shared, early: &[&str], dictations: Vec<&'static str>) {
+    /// Runs the insertion's loop over these dictations, with `early` queued before it starts.
+    fn run_dictations(
+        script: &Shared,
+        token_file: Option<PathBuf>,
+        early: &[&str],
+        dictations: Vec<&'static str>,
+    ) {
         let (texts, received) = mpsc::channel();
         for text in early {
             texts.send((*text).to_owned()).unwrap();
         }
         script.borrow_mut().dictations = Some((texts, dictations));
-        run(worker(script, None), &received);
+        run(worker(script, token_file), &received);
     }
 
     struct FakeDesktop(Shared);
@@ -674,6 +743,7 @@ mod tests {
 
     impl Desktop for FakeDesktop {
         type Clipboard = FakeClipboard;
+        type Session = ();
         type Keyboard = FakeKeyboard;
 
         fn connect_clipboard(&mut self) -> Result<FakeClipboard, ClipboardError> {
@@ -687,23 +757,44 @@ mod tests {
             })
         }
 
-        fn open_keyboard(
-            &mut self,
-            token: Option<&str>,
-            _clipboard: &mut FakeClipboard,
-        ) -> Result<Opened<FakeKeyboard>, PasteError> {
-            let mut script = self.0.borrow_mut();
-            script
+        fn start_session(&mut self, token: Option<&str>) -> io::Result<Answer<()>> {
+            let script = &mut *self.0.borrow_mut();
+            let answered = script
                 .step(token.map_or_else(
                     || "open a session without a token".to_owned(),
                     |token| format!("open a session with the token {token}"),
                 ))
-                .map_err(Failure::paste)?;
-            let new_token = (!script.tokens.is_empty()).then(|| script.tokens.remove(0).to_owned());
-            Ok(Opened {
-                keyboard: FakeKeyboard(Rc::clone(&self.0)),
-                new_token,
-            })
+                .map_err(Failure::portal)
+                .map(|()| Started {
+                    session: (),
+                    new_token: (!script.tokens.is_empty())
+                        .then(|| script.tokens.remove(0).to_owned()),
+                });
+            let (sender, answer) = mpsc::channel();
+            match script.portal_answers {
+                PortalAnswers::AtOnce => sender.send(answered).unwrap(),
+                PortalAnswers::AtTheNextWait => {
+                    script.portal_waits = true;
+                    script.pending_answer = Some((sender, answered));
+                }
+                PortalAnswers::Late => {
+                    script.portal_waits = true;
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_millis(50));
+                        let _ = sender.send(answered);
+                    });
+                }
+            }
+            Ok(answer)
+        }
+
+        fn connect_keyboard(&mut self, (): ()) -> Result<FakeKeyboard, KeyboardError> {
+            let mut script = self.0.borrow_mut();
+            script.portal_waits = false;
+            script
+                .failure("connect the keyboard")
+                .map_or(Ok(()), |failure| Err(failure.keyboard()))?;
+            Ok(FakeKeyboard(Rc::clone(&self.0)))
         }
 
         fn wait(
@@ -713,6 +804,21 @@ mod tests {
             until: Option<Instant>,
         ) -> Result<(), PasteError> {
             let script = &mut *self.0.borrow_mut();
+            if script.portal_waits {
+                if let Some((sender, answered)) = script.pending_answer.take() {
+                    sender.send(answered).unwrap();
+                }
+                return script
+                    .step(
+                        if clipboard.is_some() {
+                            "wait for the portal"
+                        } else {
+                            "wait for the portal without the clipboard"
+                        }
+                        .to_owned(),
+                    )
+                    .map_err(Failure::paste);
+            }
             let Some(until) = until else {
                 if let Some((texts, dictations)) = &mut script.dictations {
                     if dictations.is_empty() {
@@ -729,9 +835,7 @@ mod tests {
             } else {
                 "wait for the clipboard alone"
             };
-            if script.happened.last().is_none_or(|last| last != step) {
-                script.step(step.to_owned()).map_err(Failure::paste)?;
-            }
+            script.step(step.to_owned()).map_err(Failure::paste)?;
             if let (Some(selection), Some(clipboard)) =
                 (script.taken_during_the_wait.take(), clipboard)
             {
@@ -1129,12 +1233,12 @@ mod tests {
     }
 
     #[test]
-    fn after_the_user_ended_the_session_the_next_dictation_asks_again_and_later_ones_restore_it() {
+    fn after_a_session_ended_on_purpose_the_next_dictation_asks_again_and_later_ones_restore_it() {
         let dir = TempDir::new();
         let token_file = saved_token(&dir, "saved");
         let script = script([Previous::Empty, Previous::Empty]);
         script.borrow_mut().tokens = vec!["first", "second"];
-        failing(&script, "wait between dictations", Failure::EndedByTheUser);
+        failing(&script, "wait between dictations", Failure::EndedOnPurpose);
         failing(&script, "wait between dictations", Failure::SessionEnded);
         let mut worker = worker(&script, Some(token_file));
         worker.open().unwrap();
@@ -1156,7 +1260,7 @@ mod tests {
     }
 
     #[test]
-    fn after_the_user_denied_the_session_the_next_dictation_asks_again() {
+    fn after_a_denied_permission_the_next_dictation_asks_again() {
         let dir = TempDir::new();
         let token_file = saved_token(&dir, "saved");
         let script = script([Previous::Empty, Previous::Empty]);
@@ -1263,7 +1367,7 @@ mod tests {
         let script = script([Previous::Empty, Previous::Empty]);
         failing(&script, "press Shift+Insert", Failure::Paused);
 
-        run_dictations(&script, &[], vec!["lost", "pasted"]);
+        run_dictations(&script, None, &[], vec!["lost", "pasted"]);
 
         assert!(
             happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
@@ -1277,7 +1381,7 @@ mod tests {
         let script = script([Previous::Empty, Previous::Empty]);
         failing(&script, "wait between dictations", Failure::SessionEnded);
 
-        run_dictations(&script, &[], vec!["pasted"]);
+        run_dictations(&script, None, &[], vec!["pasted"]);
 
         assert_eq!(
             opened(&script),
@@ -1298,7 +1402,7 @@ mod tests {
     fn a_final_text_that_ends_before_the_insertion_is_ready_is_not_inserted() {
         let script = script([Previous::Empty, Previous::Empty]);
 
-        run_dictations(&script, &["early"], vec!["pasted"]);
+        run_dictations(&script, None, &["early"], vec!["pasted"]);
 
         let happened = happened(&script);
         assert!(
@@ -1314,10 +1418,256 @@ mod tests {
     #[test]
     fn an_insertion_that_cannot_start_inserts_no_dictation() {
         let script = script([Previous::Empty, Previous::Empty]);
-        failing(&script, "open a session without a token", Failure::Denied);
+        failing(&script, "open a session without a token", Failure::NoPortal);
 
-        run_dictations(&script, &[], vec!["lost"]);
+        run_dictations(&script, None, &[], vec!["lost"]);
 
         assert_eq!(happened(&script), OPENED);
+    }
+
+    #[test]
+    fn a_session_ended_on_purpose_after_the_key_is_asked_for_again_by_the_next_dictation() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "wait", Failure::EndedOnPurpose);
+        let mut worker = worker(&script, Some(token_file.clone()));
+
+        assert!(!worker.insert("pasted").is_empty());
+        inserted(&mut worker, "next");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session without a token",
+            ]
+        );
+        assert!(!token_file.exists());
+    }
+
+    #[test]
+    fn a_session_lost_after_the_key_is_opened_again_with_the_saved_token_by_the_next_dictation() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        script.borrow_mut().tokens = vec!["renewed"];
+        failing(&script, "wait", Failure::SessionEnded);
+        let mut worker = worker(&script, Some(token_file));
+
+        assert!(!worker.insert("pasted").is_empty());
+        inserted(&mut worker, "next");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session with the token renewed",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wait_that_fails_again_once_the_session_is_lost_restores_at_once() {
+        let script = script([text("copied"), text("selected")]);
+        failing(&script, "wait", Failure::SessionEnded);
+        failing(&script, "wait for the clipboard alone", Failure::Poll);
+
+        let troubles = worker(&script, None).insert("pasted");
+
+        assert!(
+            matches!(
+                troubles[..],
+                [
+                    Trouble::AfterTheKey(PasteError::Keyboard(KeyboardError::Disconnected(None))),
+                    Trouble::AfterTheKey(PasteError::Wait(_)),
+                ]
+            ),
+            "{troubles:?}"
+        );
+        assert_eq!(
+            happened(&script)[8..],
+            [
+                "wait",
+                "wait for the clipboard alone",
+                "offer the clipboard: copied",
+                "offer the primary selection: selected",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_daemon_started_again_after_a_session_ended_on_purpose_asks_again_too() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "wait between dictations", Failure::EndedOnPurpose);
+        let mut before = worker(&script, Some(token_file.clone()));
+        before.open().unwrap();
+        assert!(before.idle().is_err());
+        drop(before);
+
+        inserted(&mut worker(&script, Some(token_file)), "pasted");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "connect the clipboard",
+                "open a session without a token",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_daemon_started_again_after_a_denied_permission_asks_again_too() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(
+            &script,
+            "open a session with the token saved",
+            Failure::Denied,
+        );
+        assert!(
+            !worker(&script, Some(token_file.clone()))
+                .insert("lost")
+                .is_empty()
+        );
+
+        inserted(&mut worker(&script, Some(token_file)), "pasted");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "connect the clipboard",
+                "open a session without a token",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_token_left_behind_is_deleted_when_the_session_that_asked_again_brings_none() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let token_dir = token_file.parent().unwrap().to_owned();
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(&script, "wait between dictations", Failure::EndedOnPurpose);
+        let mut worker = worker(&script, Some(token_file.clone()));
+        worker.open().unwrap();
+
+        fs::set_permissions(&token_dir, fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(worker.idle().is_err());
+        fs::set_permissions(&token_dir, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(token_file.exists());
+        inserted(&mut worker, "asked");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session without a token",
+            ]
+        );
+        assert!(!token_file.exists());
+    }
+
+    #[test]
+    fn the_token_of_a_session_whose_keyboard_does_not_connect_is_kept() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        script.borrow_mut().tokens = vec!["renewed", "later"];
+        failing(&script, "connect the keyboard", Failure::SessionEnded);
+        let mut worker = worker(&script, Some(token_file.clone()));
+
+        assert!(!worker.insert("lost").is_empty());
+        assert_eq!(
+            remote_desktop::read_token(&token_file).as_deref(),
+            Some("renewed")
+        );
+        inserted(&mut worker, "pasted");
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session with the token renewed",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_clipboard_is_served_while_the_portal_waits_for_the_user() {
+        let script = script([Previous::Empty, Previous::Empty]);
+        script.borrow_mut().portal_answers = PortalAnswers::AtTheNextWait;
+
+        inserted(&mut worker(&script, None), "pasted");
+
+        assert_eq!(
+            happened(&script)[..4],
+            [
+                "connect the clipboard",
+                "open a session without a token",
+                "wait for the portal",
+                "take the clipboard",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_clipboard_that_fails_while_the_portal_waits_is_not_served_again_and_the_session_opens() {
+        let script = script([Previous::Empty, Previous::Empty]);
+        script.borrow_mut().portal_answers = PortalAnswers::Late;
+        failing(&script, "wait for the portal", Failure::Clipboard);
+
+        let troubles = worker(&script, None).insert("pasted");
+
+        assert!(troubles.is_empty(), "{troubles:?}");
+        assert_eq!(
+            happened(&script)[..4],
+            [
+                "connect the clipboard",
+                "open a session without a token",
+                "wait for the portal",
+                "take the clipboard",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_permission_denied_at_the_start_is_asked_for_again_by_the_next_dictation() {
+        let dir = TempDir::new();
+        let token_file = saved_token(&dir, "saved");
+        let script = script([Previous::Empty, Previous::Empty]);
+        failing(
+            &script,
+            "open a session with the token saved",
+            Failure::Denied,
+        );
+
+        run_dictations(&script, Some(token_file.clone()), &[], vec!["pasted"]);
+
+        assert_eq!(
+            opened(&script),
+            [
+                "connect the clipboard",
+                "open a session with the token saved",
+                "open a session without a token",
+            ]
+        );
+        assert!(
+            happened(&script).contains(&"offer the clipboard: pasted".to_owned()),
+            "{:?}",
+            happened(&script)
+        );
+        assert!(!token_file.exists());
     }
 }

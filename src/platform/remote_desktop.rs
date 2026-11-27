@@ -49,8 +49,8 @@ impl RemoteDesktop {
     }
 }
 
-pub(crate) struct Started {
-    pub(crate) session: RemoteDesktop,
+pub(crate) struct Started<S = RemoteDesktop> {
+    pub(crate) session: S,
     /// What restores the permission at the next start.
     pub(crate) new_token: Option<String>,
 }
@@ -76,6 +76,14 @@ pub(crate) fn write_token(path: &Path, token: &str) -> io::Result<()> {
         .mode(0o600)
         .open(path)?
         .write_all(token.as_bytes())
+}
+
+/// Deletes the token; one already gone is no error.
+pub(crate) fn forget_token(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
 }
 
 /// The object path the portal answers a request on, which a caller must listen at before it
@@ -193,7 +201,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    use super::{read_token, request_path, token_path, write_token};
+    use super::{forget_token, read_token, request_path, token_path, write_token};
     use crate::test_support::TempDir;
 
     #[test]
@@ -236,6 +244,18 @@ mod tests {
         let mode = |path: &Path| path.metadata().unwrap().permissions().mode() & 0o777;
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
+
+    #[test]
+    fn a_forgotten_token_is_gone_and_forgetting_a_missing_one_is_no_error() {
+        let dir = TempDir::new();
+        let path = dir.path().join("state/copper-dictate/remote-desktop-token");
+        write_token(&path, "saved").unwrap();
+
+        forget_token(&path).unwrap();
+
+        assert!(!path.exists());
+        forget_token(&path).unwrap();
     }
 
     #[test]
