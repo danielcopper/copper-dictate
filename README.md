@@ -99,12 +99,13 @@ The key goes through the desktop's remote-control portal. At the first start Pla
 Control" dialog; with "Allow restoring on future sessions" ticked, later starts only show a notification, as the daemon
 keeps the portal's token in `$XDG_STATE_HOME/copper-dictate/remote-desktop-token` (`~/.local/state/copper-dictate/` when
 the variable is unset). Without a Wayland session, without `ext-data-control` on the compositor, or with the portal
-missing or the permission denied when the daemon starts, it says once on stderr why it cannot insert and keeps
-dictating, with the text on `toggle`'s output only; a final text that ends while the remote-control session starts is
-not inserted either. When one insertion fails, the daemon puts the previous contents back, says on stderr what failed
-and whether the paste key had been sent (then the text may be at the cursor all the same), and tries again with the next
-dictation. If the remote-control session has ended, that dictation opens a new one: with the saved token after a
-failure, and with the dialog again after you ended the session ("End") or denied the permission.
+missing, it says once on stderr why it cannot insert and keeps dictating, with the text on `toggle`'s output only; a
+final text that ends while the daemon's first remote-control session starts is not inserted either. When one insertion
+fails, the daemon puts the previous contents back where it can, says on stderr what failed and whether the paste key had
+been sent (then the text may be at the cursor all the same), and tries again with the next dictation. If the
+remote-control session has ended, that dictation opens a new one with the saved token. After the session was ended on
+purpose (its "End", or the portal closing it) or the permission was denied, also at the daemon's start, the daemon
+deletes the token, so the next dictation shows the dialog again, after a restart of the daemon as well.
 
 ## Development
 

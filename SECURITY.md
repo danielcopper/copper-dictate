@@ -48,5 +48,7 @@ copper-dictate runs as a daemon under your user and records from the default mic
   that may emulate a keyboard while the daemon runs; the daemon sends Shift+Insert and no other key. With "Allow
   restoring on future sessions", the portal's token lies in the state directory
   [the README](README.md#insertion-at-the-cursor) names, a file and directory only your user can open; it lets a later
-  start open a session without asking. Without the file, the next start asks again. After you end the session or deny
-  the permission, the next dictation asks again instead of using the token.
+  start open a session without asking. Without the file, the next start asks again. After the session was ended on
+  purpose (its "End", or the portal closing it) or the permission was denied, the daemon deletes the file, so the next
+  dictation asks again, after a restart as well; a deletion that fails is said on stderr, and the daemon's next start
+  then restores the permission without asking.
