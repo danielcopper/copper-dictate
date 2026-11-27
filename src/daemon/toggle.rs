@@ -1,10 +1,11 @@
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use crate::protocol::{Reply, Request};
+use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
+use crate::log;
 
 #[derive(Debug, Error)]
 enum ToggleError {
@@ -28,20 +29,20 @@ pub(crate) fn run(socket: &Path, out: &mut dyn Write, err: &mut dyn Write) -> bo
                 true
             }
             Err(error) => {
-                let _ = writeln!(err, "copper-dictate: cannot print the final text: {error}");
+                let _ = log::write(err, format_args!("cannot print the final text: {error}"));
                 false
             }
         },
         Ok(Reply::Recording) => {
-            let _ = writeln!(err, "copper-dictate: recording; toggle again to stop");
+            let _ = log::write(err, "recording; toggle again to stop");
             true
         }
         Ok(Reply::Error { message }) => {
-            let _ = writeln!(err, "copper-dictate: {message}");
+            let _ = log::write(err, message);
             false
         }
         Err(error) => {
-            let _ = writeln!(err, "copper-dictate: {error}");
+            let _ = log::write(err, error);
             false
         }
     }
@@ -53,27 +54,28 @@ fn warn_of_glitches(glitches: u32, err: &mut dyn Write) {
         1 => "once".to_owned(),
         n => format!("{n} times"),
     };
-    let _ = writeln!(
+    let _ = log::write(
         err,
-        "copper-dictate: warning: the microphone glitched {times} during the recording; parts of the audio may be missing"
+        format_args!(
+            "warning: the microphone glitched {times} during the recording; parts of the audio may be missing"
+        ),
     );
 }
 
 fn send(socket: &Path) -> Result<Reply, ToggleError> {
-    let mut stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
+    let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
             ToggleError::NotRunning(socket.to_owned())
         }
         _ => ToggleError::Io(error),
     })?;
-    let mut request = serde_json::to_string(&Request::Toggle)?;
-    request.push('\n');
-    stream.write_all(request.as_bytes())?;
-    let mut line = String::new();
-    if BufReader::new(&stream).read_line(&mut line)? == 0 {
-        return Err(ToggleError::NoAnswer);
+    write_message(&stream, &Request::Toggle)?;
+    match read_message(&mut BufReader::new(&stream)) {
+        Ok(Some(reply)) => Ok(reply),
+        Ok(None) => Err(ToggleError::NoAnswer),
+        Err(ReadError::Io(error)) => Err(ToggleError::Io(error)),
+        Err(ReadError::Json(error)) => Err(ToggleError::Answer(error)),
     }
-    Ok(serde_json::from_str(&line)?)
 }
 
 #[cfg(test)]
@@ -122,6 +124,20 @@ mod tests {
         assert_eq!(
             String::from_utf8(err).unwrap(),
             "copper-dictate: the daemon closed the connection without an answer; is it still running?\n"
+        );
+    }
+
+    #[test]
+    fn an_answer_that_is_no_reply_is_reported() {
+        let (_runtime_dir, socket) = daemon_answering(b"not json\n");
+        let mut err = Vec::new();
+
+        assert!(!run(&socket, &mut Vec::new(), &mut err));
+
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with("copper-dictate: the daemon's answer is not understood: "),
+            "{err}"
         );
     }
 

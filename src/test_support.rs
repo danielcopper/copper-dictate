@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -377,4 +377,38 @@ pub(crate) fn wait_until(condition: impl Fn() -> bool) {
         assert!(Instant::now() < deadline, "timed out");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Every `.rs` file under `src/`, by its path relative to `src/`, with its content.
+pub(crate) fn source_files() -> BTreeMap<String, String> {
+    fn collect(dir: &Path, src: &Path, files: &mut BTreeMap<String, String>) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, src, files);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let name = path.strip_prefix(src).unwrap().display().to_string();
+                files.insert(name, fs::read_to_string(&path).unwrap());
+            }
+        }
+    }
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = BTreeMap::new();
+    collect(&src, &src, &mut files);
+    files
+}
+
+/// [`source_files`] without `test_support.rs`, and each without its `tests` module.
+pub(crate) fn production_code() -> BTreeMap<String, String> {
+    source_files()
+        .into_iter()
+        .filter(|(name, _)| name != "test_support.rs")
+        .map(|(name, content)| {
+            let production = content
+                .split_once("#[cfg(test)]\nmod tests {")
+                .map_or(content.as_str(), |(production, _)| production)
+                .to_owned();
+            (name, production)
+        })
+        .collect()
 }

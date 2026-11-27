@@ -1,14 +1,11 @@
+mod audio;
 mod config;
 mod daemon;
-mod final_server;
-mod microphone;
-mod protocol;
-mod resample;
+mod log;
+mod servers;
 mod session;
 #[cfg(test)]
 mod test_support;
-mod toggle;
-mod wav;
 mod xdg;
 
 use std::ffi::OsString;
@@ -18,9 +15,10 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 
+use crate::audio::microphone::Microphone;
 use crate::config::Config;
-use crate::final_server::HttpFinalServer;
-use crate::microphone::Microphone;
+use crate::daemon::protocol;
+use crate::servers::final_server::HttpFinalServer;
 use crate::session::{AudioSource, BoxError, Session};
 use crate::xdg::Env;
 
@@ -46,14 +44,16 @@ fn main() -> ExitCode {
         Command::Daemon => match run_daemon(&env) {
             Ok(()) => true,
             Err(error) => {
-                eprintln!("copper-dictate: {error}");
+                log::eprint(error);
                 false
             }
         },
-        Command::Toggle => match daemon::socket_path(&env) {
-            Ok(socket) => toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock()),
+        Command::Toggle => match protocol::socket_path(&env) {
+            Ok(socket) => {
+                daemon::toggle::run(&socket, &mut io::stdout().lock(), &mut io::stderr().lock())
+            }
             Err(error) => {
-                eprintln!("copper-dictate: {error}");
+                log::eprint(error);
                 false
             }
         },
@@ -67,10 +67,10 @@ fn main() -> ExitCode {
 
 fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
-    let socket = daemon::socket_path(env)?;
+    let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
     let session = session(config, Box::new(Microphone));
-    eprintln!("copper-dictate: listening at {}", socket.display());
+    log::eprint(format_args!("listening at {}", socket.display()));
     daemon::serve(&listener, &session);
     Ok(())
 }
@@ -85,6 +85,7 @@ fn session(config: Config, audio: Box<dyn AudioSource>) -> Arc<Session> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use clap::CommandFactory;
@@ -92,7 +93,17 @@ mod tests {
     use super::{Cli, session};
     use crate::config::Config;
     use crate::session::Outcome;
-    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config};
+    use crate::test_support::{FakeHttpServer, FakeMicrophone, final_server_config, source_files};
+
+    const ROLES: [&str; 4] = ["audio", "daemon", "platform", "servers"];
+    const AT_THE_TOP: [&str; 6] = [
+        "config.rs",
+        "log.rs",
+        "main.rs",
+        "session.rs",
+        "test_support.rs",
+        "xdg.rs",
+    ];
 
     #[test]
     fn the_daemons_session_stops_at_the_configured_limit_and_sends_to_the_configured_endpoint() {
@@ -108,6 +119,46 @@ mod tests {
 
         let request = fake.requests.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(request.path, "/v1/audio/transcriptions");
+    }
+
+    #[test]
+    fn only_the_core_the_shared_modules_and_the_roles_sit_at_the_top() {
+        let misplaced: Vec<String> = source_files()
+            .into_keys()
+            .filter(|name| !name.contains('/'))
+            .filter(|name| {
+                !AT_THE_TOP.contains(&name.as_str())
+                    && !ROLES.iter().any(|role| *name == format!("{role}.rs"))
+            })
+            .collect();
+
+        assert!(misplaced.is_empty(), "{misplaced:?}");
+    }
+
+    #[test]
+    fn every_directory_is_a_role() {
+        let unknown: BTreeSet<String> = source_files()
+            .into_keys()
+            .filter_map(|name| Some(name.split_once('/')?.0.to_owned()))
+            .filter(|directory| !ROLES.contains(&directory.as_str()))
+            .collect();
+
+        assert!(unknown.is_empty(), "{unknown:?}");
+    }
+
+    #[test]
+    fn a_directorys_module_is_the_file_beside_it() {
+        let files = source_files();
+        let misplaced: Vec<&String> = files
+            .keys()
+            .filter(|name| {
+                name.rsplit_once('/').is_some_and(|(directory, file)| {
+                    file == "mod.rs" || !files.contains_key(&format!("{directory}.rs"))
+                })
+            })
+            .collect();
+
+        assert!(misplaced.is_empty(), "{misplaced:?}");
     }
 
     #[test]

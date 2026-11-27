@@ -88,6 +88,13 @@ mise run setup   # install the toolchain, the cargo tools and deno, enable the r
 mise run gate    # most of CI's checks, run locally (the list: mise.toml)
 ```
 
+The client is one binary crate, its modules grouped by role. `src/session.rs` is the core, the platform-independent
+logic of a dictation. `src/audio/` holds the audio source (the microphone and its resampling to 16 kHz mono),
+`src/servers/` the clients of the servers (today the final server's, with its WAV encoding), and `src/daemon.rs` the
+daemon, with the socket protocol it shares with `toggle` in `src/daemon/protocol.rs` and the `toggle` command in
+`src/daemon/toggle.rs`. The configuration (`config.rs`), the XDG directories (`xdg.rs`) and the log lines (`log.rs`) sit
+at the top.
+
 ## License
 
 MIT — see [LICENSE](LICENSE).

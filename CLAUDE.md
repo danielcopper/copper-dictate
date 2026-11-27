@@ -34,6 +34,13 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
   `pkg-config` on Debian and Ubuntu) · **Tests** `mise run test` (nextest; unit tests beside the code in `src/`, the
   binary's tests in `tests/`) · **Lint** `mise run lint` (clippy, warnings as errors) · **Coverage** `mise run coverage`
   → `lcov.info`.
+- **Layout** by role, in one binary crate: `src/session.rs` is the core; `src/audio/` the audio source; `src/servers/`
+  the server clients (today the final server's; the live server's comes here too); `src/daemon.rs` the daemon, with
+  `daemon/protocol.rs` (the socket path and the one-JSON-message-per-line framing, for every client of the socket) and
+  `daemon/toggle.rs`; `config.rs`, `xdg.rs` and `log.rs` (every log line, which adds the `copper-dictate:` prefix) at
+  the top. `src/platform/` comes with the first platform part. A directory's module is the file beside it (`audio.rs`
+  next to `audio/`), never a `mod.rs`. A library (`lib.rs`) comes once a second binary or a test under `tests/` needs
+  the modules.
 - **Toolchain** `rust-toolchain.toml` is the one source for the Rust version; CI, mise and rustup all read it. The cargo
   tools and deno are pinned in `mise.toml`, and CI installs them from there.
 - **Lints** are denied in `Cargo.toml` (`[lints]`), not only in CI: clippy `all` and `pedantic`, and no `unwrap` or

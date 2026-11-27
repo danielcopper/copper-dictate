@@ -8,8 +8,8 @@ use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
 use ureq::{Agent, Body};
 
 use crate::config::FinalServerConfig;
+use crate::servers::wav;
 use crate::session::{BoxError, FinalServer, Recording};
-use crate::wav;
 
 /// An OpenAI-compatible `/v1/audio/transcriptions` endpoint.
 ///
