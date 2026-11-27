@@ -35,8 +35,8 @@ Self-hosted live dictation for Linux desktops: live preview while you speak, an 
   server has a default language of its own
 - **Insertion at the cursor on KDE Plasma (Wayland)** — the final text is pasted into the focused window through the
   clipboard, so umlauts and every keyboard layout work, and the clipboard gets its previous content back
-- **Nothing but the dictation leaves your machine** — no telemetry, no connection but the configured endpoint (proxy
-  variables are ignored, redirects are not followed), and the recording is dropped once its text is back
+- **Nothing but the dictation leaves your machine** — no telemetry, no network connection but the configured endpoint
+  (proxy variables are ignored, redirects are not followed), and the recording is dropped once its text is back
 
 ## Planned
 
@@ -90,9 +90,10 @@ prints it. Line breaks in the text become spaces and other control characters ar
 Enter or sends an escape sequence; a text of whitespace alone is not pasted. The daemon sets the text as the clipboard
 and the primary selection, marked so Klipper keeps no copy, and sends Shift+Insert, which pastes in terminals and in GUI
 text fields alike. It then puts back what the clipboard and the primary selection held before (text, HTML, file lists
-and one image type, up to 64 MiB each), 200 ms after the window read the text or after `restore_timeout_ms` when nothing
-read it. Contents a password manager marked are not kept, so that selection is left empty, and a selection another
-application set in the meantime is left as it is. A type that does not come back is named on stderr with the reason.
+and one image type, up to 64 MiB per selection), 200 ms after the window read the text or after `restore_timeout_ms`
+when nothing read it. Contents a password manager marked are not kept, so that selection is left empty, and a selection
+another application set in the meantime is left as it is. Of the types it keeps, one that does not come back is named on
+stderr with the reason.
 
 The key goes through the desktop's remote-control portal. At the first start Plasma asks for the permission in a "Remote
 Control" dialog; with "Allow restoring on future sessions" ticked, later starts only show a notification, as the daemon
@@ -100,8 +101,10 @@ keeps the portal's token in `$XDG_STATE_HOME/copper-dictate/remote-desktop-token
 the variable is unset). Without a Wayland session, without `ext-data-control` on the compositor, or with the portal
 missing or the permission denied when the daemon starts, it says once on stderr why it cannot insert and keeps
 dictating, with the text on `toggle`'s output only; a final text that ends while the remote-control session starts is
-not inserted either. When one insertion fails, the daemon puts the previous contents back, says why on stderr, and tries
-again with the next dictation, which opens a new remote-control session with the saved token if the last one ended.
+not inserted either. When one insertion fails, the daemon puts the previous contents back, says on stderr what failed
+and whether the paste key had been sent (then the text may be at the cursor all the same), and tries again with the next
+dictation. If the remote-control session has ended, that dictation opens a new one: with the saved token after a
+failure, and with the dialog again after you ended the session ("End") or denied the permission.
 
 ## Development
 
