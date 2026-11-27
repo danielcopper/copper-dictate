@@ -1,18 +1,22 @@
 use std::io;
-use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use reis::PendingRequestResult;
 use reis::ei::{self, handshake::ContextType, keyboard::KeyState};
 use reis::event::{self, DeviceCapability, EiEvent, EiEventConverter};
-use reis::handshake::ei_handshake_blocking;
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use reis::handshake::{EiHandshaker, HandshakeError, HandshakeResp};
+use rustix::event::{PollFd, PollFlags};
 use rustix::time::{ClockId, clock_gettime};
 use thiserror::Error;
 
+use crate::platform;
+use crate::platform::remote_desktop::RemoteDesktop;
+
 const KEY_LEFTSHIFT: u32 = 42;
 const KEY_INSERT: u32 = 110;
-const DEVICE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub(crate) enum KeyboardError {
@@ -26,8 +30,19 @@ pub(crate) enum KeyboardError {
     Parse(String),
     #[error("the compositor ended the input emulation ({})", .0.as_deref().unwrap_or("no reason given"))]
     Disconnected(Option<String>),
+    #[error("the compositor did not set the input emulation up within 5 s")]
+    NoAnswer,
     #[error("the compositor offers no emulated keyboard")]
     NoKeyboard,
+    #[error("the compositor has paused the emulated keyboard")]
+    Paused,
+}
+
+impl KeyboardError {
+    /// Whether the input emulation is gone, so that only a new session brings it back.
+    pub(crate) fn ends_the_session(&self) -> bool {
+        !matches!(self, Self::NoKeyboard | Self::Paused)
+    }
 }
 
 pub(crate) struct Keyboard {
@@ -37,12 +52,16 @@ pub(crate) struct Keyboard {
     device: Option<event::Device>,
     resumed: bool,
     sequence: u32,
+    _portal: zbus::Connection,
 }
 
 impl Keyboard {
-    pub(crate) fn connect(eis: OwnedFd) -> Result<Self, KeyboardError> {
-        let context = ei::Context::new(eis.into())?;
-        let handshake = ei_handshake_blocking(&context, "copper-dictate", ContextType::Sender)?;
+    /// Sets the input emulation up and waits for its keyboard, both within a few seconds.
+    pub(crate) fn connect(session: RemoteDesktop) -> Result<Self, KeyboardError> {
+        let (portal, eis) = session.into_parts();
+        let context = ei::Context::new(UnixStream::from(eis))?;
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        let handshake = handshake(&context, deadline)?;
         let converter = EiEventConverter::new(&context, handshake);
         let mut keyboard = Self {
             connection: converter.connection().clone(),
@@ -51,16 +70,22 @@ impl Keyboard {
             device: None,
             resumed: false,
             sequence: 0,
+            _portal: portal,
         };
-        let deadline = Instant::now() + DEVICE_TIMEOUT;
         while !keyboard.resumed {
-            let left = deadline
-                .checked_duration_since(Instant::now())
-                .ok_or(KeyboardError::NoKeyboard)?;
-            let timeout = Timespec::try_from(left).map_err(io::Error::other)?;
-            let mut fds = [PollFd::new(&keyboard.context, PollFlags::IN)];
-            poll(&mut fds, Some(&timeout)).map_err(io::Error::from)?;
-            keyboard.dispatch()?;
+            if Instant::now() >= deadline {
+                return Err(if keyboard.device.is_some() {
+                    KeyboardError::Paused
+                } else {
+                    KeyboardError::NoKeyboard
+                });
+            }
+            if platform::poll_until(
+                &mut [PollFd::new(&keyboard.context, PollFlags::IN)],
+                Some(deadline),
+            )? {
+                keyboard.dispatch()?;
+            }
         }
         Ok(keyboard)
     }
@@ -71,14 +96,7 @@ impl Keyboard {
 
     /// Handles what the compositor sent; call it when the socket is readable.
     pub(crate) fn dispatch(&mut self) -> Result<(), KeyboardError> {
-        match self.context.read() {
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
-                return Err(KeyboardError::Disconnected(None));
-            }
-            Err(error) => return Err(error.into()),
-        }
+        read(&self.context)?;
         while let Some(result) = self.context.pending_event() {
             match result {
                 PendingRequestResult::Request(event) => self.converter.handle_event(event)?,
@@ -96,11 +114,10 @@ impl Keyboard {
 
     /// Presses and releases Shift+Insert, which pastes whatever the keyboard layout.
     pub(crate) fn paste(&mut self) -> Result<(), KeyboardError> {
-        let device = self
-            .device
-            .as_ref()
-            .filter(|_| self.resumed)
-            .ok_or(KeyboardError::NoKeyboard)?;
+        let device = self.device.as_ref().ok_or(KeyboardError::NoKeyboard)?;
+        if !self.resumed {
+            return Err(KeyboardError::Paused);
+        }
         let keyboard: ei::Keyboard = device.interface().ok_or(KeyboardError::NoKeyboard)?;
         let serial = self.connection.serial();
         device.device().start_emulating(serial, self.sequence);
@@ -154,6 +171,46 @@ impl Keyboard {
             Err(error) if error != rustix::io::Errno::AGAIN => Err(io::Error::from(error).into()),
             _ => Ok(()),
         }
+    }
+}
+
+/// The handshake `reis` does blocking, with a deadline, so a silent compositor cannot hold
+/// the insertion up.
+fn handshake(context: &ei::Context, deadline: Instant) -> Result<HandshakeResp, KeyboardError> {
+    let mut handshaker = EiHandshaker::new("copper-dictate", ContextType::Sender);
+    loop {
+        if Instant::now() >= deadline {
+            return Err(KeyboardError::NoAnswer);
+        }
+        if !platform::poll_until(&mut [PollFd::new(context, PollFlags::IN)], Some(deadline))? {
+            continue;
+        }
+        read(context)?;
+        while let Some(result) = context.pending_event() {
+            let event = match result {
+                PendingRequestResult::Request(event) => event,
+                PendingRequestResult::ParseError(error) => {
+                    return Err(KeyboardError::Parse(error.to_string()));
+                }
+                PendingRequestResult::InvalidObject(id) => {
+                    return Err(reis::Error::from(HandshakeError::InvalidObject(id)).into());
+                }
+            };
+            if let Some(response) = handshaker.handle_event(event).map_err(reis::Error::from)? {
+                return Ok(response);
+            }
+        }
+    }
+}
+
+fn read(context: &ei::Context) -> Result<(), KeyboardError> {
+    match context.read() {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+            Err(KeyboardError::Disconnected(None))
+        }
+        Err(error) => Err(error.into()),
     }
 }
 

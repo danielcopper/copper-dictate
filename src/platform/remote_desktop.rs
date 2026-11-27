@@ -36,9 +36,23 @@ pub(crate) enum PortalError {
     Answer(zbus::Error),
 }
 
-/// A remote desktop session that may emulate a keyboard; it lasts as long as this connection.
+/// A remote desktop session that may emulate a keyboard through its input-emulation socket.
 pub(crate) struct RemoteDesktop {
-    _connection: Connection,
+    connection: Connection,
+    eis: OwnedFd,
+}
+
+impl RemoteDesktop {
+    /// The portal connection, which the session lasts as long as, and the socket.
+    pub(crate) fn into_parts(self) -> (Connection, OwnedFd) {
+        (self.connection, self.eis)
+    }
+}
+
+pub(crate) struct Started {
+    pub(crate) session: RemoteDesktop,
+    /// What restores the permission at the next start.
+    pub(crate) new_token: Option<String>,
 }
 
 pub(crate) fn token_path(env: Env<'_>) -> Option<PathBuf> {
@@ -71,11 +85,8 @@ pub(crate) fn request_path(unique_name: &str, handle_token: &str) -> String {
     format!("{PORTAL_PATH}/request/{sender}/{handle_token}")
 }
 
-type Started = (RemoteDesktop, OwnedFd, Option<String>);
-
-/// Starts a session with a keyboard and returns its input-emulation socket and the token for
-/// the next start; the saved token restores the earlier permission, and the portal asks the
-/// user where there is none or it no longer holds.
+/// Starts a session with a keyboard; the saved token restores the earlier permission, and the
+/// portal asks the user where there is none or it no longer holds.
 pub(crate) fn start(restore_token: Option<&str>) -> Result<Started, PortalError> {
     zbus::block_on(start_session(restore_token))
 }
@@ -120,13 +131,13 @@ async fn start_session(restore_token: Option<&str>) -> Result<Started, PortalErr
         .call("ConnectToEIS", &(session.as_ref(), options))
         .await
         .map_err(PortalError::Answer)?;
-    Ok((
-        RemoteDesktop {
-            _connection: connection,
+    Ok(Started {
+        session: RemoteDesktop {
+            connection,
+            eis: OwnedFd::from(eis),
         },
-        OwnedFd::from(eis),
         new_token,
-    ))
+    })
 }
 
 async fn request<'o, B>(

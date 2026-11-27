@@ -70,7 +70,7 @@ fn run_daemon(env: Env<'_>) -> Result<(), BoxError> {
     let config = config::load(&config::path(env)?, env)?;
     let socket = protocol::socket_path(env)?;
     let listener = daemon::bind(&socket)?;
-    let insertion = platform::insertion(env, config.insertion.clone());
+    let insertion = platform::insertion(env, &config.insertion);
     let session = session(config, Box::new(Microphone), insertion);
     log::eprint(format_args!("listening at {}", socket.display()));
     daemon::serve(&listener, &session);

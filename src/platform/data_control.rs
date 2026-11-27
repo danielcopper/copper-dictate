@@ -1,11 +1,12 @@
+use std::fmt::{self, Display};
 use std::fs::File;
 use std::io::{self, PipeReader, Read, Write};
-use std::os::fd::{AsFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use rustix::event::{PollFd, PollFlags, Timespec, poll};
+use rustix::event::{PollFd, PollFlags};
 use thiserror::Error;
 use wayland_client::backend::{ReadEventsGuard, WaylandError};
 use wayland_client::globals::{BindError, GlobalError, GlobalListContents, registry_queue_init};
@@ -29,9 +30,8 @@ use wayland_protocols::ext::data_control::v1::client::ext_data_control_source_v1
 };
 
 use crate::log;
-use crate::platform::clipboard::{self, Snapshot};
-
-const READ_TIMEOUT: Duration = Duration::from_millis(500);
+use crate::platform;
+use crate::platform::contents::{self, Lost, Previous, READ_TIMEOUT, Snapshot};
 
 #[derive(Debug, Error)]
 pub(crate) enum ClipboardError {
@@ -57,7 +57,16 @@ pub(crate) enum Selection {
     Primary,
 }
 
-const SELECTIONS: [Selection; 2] = [Selection::Clipboard, Selection::Primary];
+pub(crate) const SELECTIONS: [Selection; 2] = [Selection::Clipboard, Selection::Primary];
+
+impl Display for Selection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Clipboard => "clipboard",
+            Self::Primary => "primary selection",
+        })
+    }
+}
 
 /// The clipboard and the primary selection through `ext-data-control`, which needs no window.
 pub(crate) struct Clipboard {
@@ -111,12 +120,12 @@ impl Clipboard {
         Ok(Self { queue, state })
     }
 
-    /// Dispatches what has arrived and returns the guard to wait on for more, or `None` when
-    /// more had already arrived.
-    pub(crate) fn prepare_read(&mut self) -> Result<Option<ReadEventsGuard>, ClipboardError> {
+    /// Dispatches what has arrived and returns what to wait on for more, or `None` when more
+    /// had already arrived.
+    pub(crate) fn prepare_read(&mut self) -> Result<Option<Incoming>, ClipboardError> {
         self.queue.dispatch_pending(&mut self.state)?;
         self.queue.flush()?;
-        Ok(self.queue.prepare_read())
+        Ok(self.queue.prepare_read().map(Incoming))
     }
 
     pub(crate) fn dispatch(&mut self) -> Result<(), ClipboardError> {
@@ -135,36 +144,55 @@ impl Clipboard {
         std::mem::take(&mut self.state.reads)
     }
 
-    pub(crate) fn snapshot(&mut self, selection: Selection) -> Result<Snapshot, ClipboardError> {
+    pub(crate) fn snapshot(&mut self, selection: Selection) -> Result<Previous, ClipboardError> {
         self.queue.roundtrip(&mut self.state)?;
         self.check()?;
         let index = selection as usize;
         if let Some(owned) = &self.state.owned[index] {
-            return Ok(owned.contents.as_ref().clone());
+            return Ok(Previous::Kept {
+                snapshot: owned.contents.as_ref().clone(),
+                lost: Vec::new(),
+            });
         }
         let Some(offer) = self.state.offers[index].clone() else {
-            return Ok(Snapshot::default());
+            return Ok(Previous::Empty);
         };
         let offered = offer
             .data::<OfferedTypes>()
             .map_or_else(Vec::new, |types| lock(&types.0).clone());
-        Ok(Snapshot::take(
-            &clipboard::kept_types(&offered),
-            |mime, limit| self.receive(&offer, mime, limit),
-        ))
+        Ok(contents::keep(&offered, |mime, limit| {
+            self.receive(&offer, mime, limit)
+        }))
     }
 
-    /// Offers the contents as the selection, or clears it when there are none.
-    pub(crate) fn set(
+    pub(crate) fn offer(
         &mut self,
         selection: Selection,
         contents: Arc<Snapshot>,
     ) -> Result<(), ClipboardError> {
+        self.set(selection, Some(contents))
+    }
+
+    pub(crate) fn clear(&mut self, selection: Selection) -> Result<(), ClipboardError> {
+        self.set(selection, None)
+    }
+
+    /// Whether the selection still holds these contents, which it no longer does once another
+    /// client has set it.
+    pub(crate) fn offers(&self, selection: Selection, contents: &Arc<Snapshot>) -> bool {
+        self.state.owned[selection as usize]
+            .as_ref()
+            .is_some_and(|owned| Arc::ptr_eq(&owned.contents, contents))
+    }
+
+    fn set(
+        &mut self,
+        selection: Selection,
+        contents: Option<Arc<Snapshot>>,
+    ) -> Result<(), ClipboardError> {
         self.check()?;
         let index = selection as usize;
-        let source = if contents.is_empty() {
-            None
-        } else {
+        let owned = contents.map(|contents| {
             let source = self
                 .state
                 .manager
@@ -172,16 +200,14 @@ impl Clipboard {
             for (mime, _) in &contents.contents {
                 source.offer(mime.clone());
             }
-            Some(source)
-        };
+            Owned { source, contents }
+        });
+        let source = owned.as_ref().map(|owned| &owned.source);
         match selection {
-            Selection::Clipboard => self.state.device.set_selection(source.as_ref()),
-            Selection::Primary => self.state.device.set_primary_selection(source.as_ref()),
+            Selection::Clipboard => self.state.device.set_selection(source),
+            Selection::Primary => self.state.device.set_primary_selection(source),
         }
-        let replaced = std::mem::replace(
-            &mut self.state.owned[index],
-            source.map(|source| Owned { source, contents }),
-        );
+        let replaced = std::mem::replace(&mut self.state.owned[index], owned);
         if let Some(replaced) = replaced {
             replaced.source.destroy();
         }
@@ -194,10 +220,10 @@ impl Clipboard {
         offer: &ExtDataControlOfferV1,
         mime: &str,
         limit: usize,
-    ) -> Option<Vec<u8>> {
-        let (reader, writer) = io::pipe().ok()?;
+    ) -> Result<Vec<u8>, Lost> {
+        let (reader, writer) = io::pipe().map_err(unreadable)?;
         offer.receive(mime.to_owned(), writer.as_fd());
-        self.queue.flush().ok()?;
+        self.queue.flush().map_err(unreadable)?;
         drop(writer);
         read_within(reader, limit, Instant::now() + READ_TIMEOUT)
     }
@@ -210,29 +236,49 @@ impl Clipboard {
     }
 }
 
-/// Reads to the end, or nothing when the data outgrows the limit or the deadline passes.
-fn read_within(mut reader: PipeReader, limit: usize, deadline: Instant) -> Option<Vec<u8>> {
+/// What the compositor sends next, to wait for beside other descriptors.
+pub(crate) struct Incoming(ReadEventsGuard);
+
+impl Incoming {
+    pub(crate) fn fd(&self) -> BorrowedFd<'_> {
+        self.0.connection_fd()
+    }
+
+    /// Reads what has arrived; call [`Clipboard::dispatch`] after it.
+    pub(crate) fn read(self) -> Result<(), ClipboardError> {
+        match self.0.read() {
+            Ok(_) => Ok(()),
+            Err(WaylandError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+/// Reads to the end, unless the data outgrows the limit or the deadline passes first.
+fn read_within(mut reader: PipeReader, limit: usize, deadline: Instant) -> Result<Vec<u8>, Lost> {
     let mut data = Vec::new();
     let mut chunk = vec![0; 64 * 1024];
     loop {
-        let left = deadline.checked_duration_since(Instant::now())?;
-        let timeout = Timespec::try_from(left).ok()?;
-        let mut fds = [PollFd::new(&reader, PollFlags::IN)];
-        if poll(&mut fds, Some(&timeout)).ok()? == 0 {
-            return None;
+        if Instant::now() >= deadline {
+            return Err(Lost::NoAnswer);
+        }
+        if !platform::poll_until(&mut [PollFd::new(&reader, PollFlags::IN)], Some(deadline))
+            .map_err(unreadable)?
+        {
+            continue;
         }
         match reader.read(&mut chunk) {
-            Ok(0) => return Some(data),
-            Ok(read) => {
-                if data.len() + read > limit {
-                    return None;
-                }
-                data.extend_from_slice(&chunk[..read]);
-            }
+            Ok(0) => return Ok(data),
+            Ok(read) if data.len() + read > limit => return Err(Lost::TooBig),
+            Ok(read) => data.extend_from_slice(&chunk[..read]),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(_) => return None,
+            Err(error) => return Err(unreadable(error)),
         }
     }
+}
+
+fn unreadable(error: impl Display) -> Lost {
+    Lost::Unreadable(error.to_string())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -361,5 +407,58 @@ impl Dispatch<ExtDataControlSourceV1, Arc<Snapshot>> for State {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use super::read_within;
+    use crate::platform::contents::Lost;
+
+    fn soon() -> Instant {
+        Instant::now() + Duration::from_secs(10)
+    }
+
+    #[test]
+    fn data_of_exactly_the_limit_is_read_to_the_end() {
+        let (reader, mut writer) = io::pipe().unwrap();
+        let writing = thread::spawn(move || {
+            for _ in 0..2 {
+                writer.write_all(&[b'x'; 5]).unwrap();
+                thread::sleep(Duration::from_millis(10));
+            }
+        });
+
+        assert_eq!(read_within(reader, 10, soon()), Ok(vec![b'x'; 10]));
+        writing.join().unwrap();
+    }
+
+    #[test]
+    fn data_over_the_limit_is_too_big() {
+        let (reader, mut writer) = io::pipe().unwrap();
+        writer.write_all(&[b'x'; 11]).unwrap();
+        drop(writer);
+
+        assert_eq!(read_within(reader, 10, soon()), Err(Lost::TooBig));
+    }
+
+    #[test]
+    fn a_writer_that_sends_nothing_goes_unanswered_at_the_deadline() {
+        let (reader, _writer) = io::pipe().unwrap();
+        let started = Instant::now();
+
+        assert_eq!(
+            read_within(reader, 10, started + Duration::from_millis(50)),
+            Err(Lost::NoAnswer)
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(50) && waited < Duration::from_secs(2),
+            "{waited:?}"
+        );
     }
 }
