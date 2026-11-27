@@ -28,7 +28,8 @@ pub(crate) enum KeyboardError {
     Event(#[from] event::EventError),
     #[error("the input emulation's message is not understood: {0}")]
     Parse(String),
-    /// Both the portal's "End" and a restart of the portal arrive this way.
+    /// Traced in the portal's source, not checked on a device: both its "End" and a restart of
+    /// the portal arrive this way.
     #[error("the compositor ended the remote control session on purpose ({})", .0.as_deref().unwrap_or("no reason given"))]
     EndedOnPurpose(Option<String>),
     #[error("the compositor ended the input emulation ({})", .0.as_deref().unwrap_or("no reason given"))]
@@ -204,7 +205,7 @@ fn handshake(context: &ei::Context, deadline: Instant) -> Result<HandshakeResp, 
     }
 }
 
-/// Only a disconnect on purpose ends the session; any other reason is a failure.
+/// A disconnect on purpose is an end on purpose; any other reason is a failure.
 fn lost(disconnected: event::Disconnected) -> KeyboardError {
     match disconnected.reason {
         DisconnectReason::Disconnected => KeyboardError::EndedOnPurpose(disconnected.explanation),
@@ -246,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn a_disconnect_on_purpose_ends_the_session_and_any_other_is_a_failure() {
+    fn a_disconnect_on_purpose_is_an_end_on_purpose_and_any_other_is_a_failure() {
         assert!(matches!(
             lost(disconnected(DisconnectReason::Disconnected)),
             KeyboardError::EndedOnPurpose(Some(why)) if why == "why"

@@ -304,8 +304,8 @@ impl SavedToken {
             && let Err(error) = remote_desktop::forget_token(file)
         {
             log::eprint(format_args!(
-                "cannot delete the remote control permission in {}: {error}; the next start \
-                 restores it without asking",
+                "cannot delete the remote control permission in {}: {error}; the file left \
+                 behind may let the daemon's next start restore the permission without asking",
                 file.display()
             ));
         }
