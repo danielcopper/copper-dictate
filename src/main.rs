@@ -33,6 +33,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Run the daemon that records from the default microphone and inserts the final server's text at the cursor
+    /// on KDE Plasma (Wayland)
     Daemon,
     /// Start a recording, or stop the running one and print its final text
     Toggle,

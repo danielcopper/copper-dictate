@@ -23,8 +23,8 @@ impl Insertion for NoInsertion {
 }
 
 /// The insertion this desktop allows; where there is none, it says why once and inserts nowhere.
-/// Only the check for a Wayland session goes through `env`: the connections to the compositor
-/// and the session bus read the process's environment themselves.
+/// Only the check for a Wayland session and the token's path go through `env`: the connections
+/// to the compositor and the session bus read the process's environment themselves.
 pub(crate) fn insertion(env: Env<'_>, config: &InsertionConfig) -> Box<dyn Insertion> {
     if env("WAYLAND_DISPLAY").is_none_or(|display| display.is_empty()) {
         cannot_insert("no Wayland session (WAYLAND_DISPLAY is not set)");
