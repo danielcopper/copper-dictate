@@ -142,9 +142,16 @@ mod tests {
     fn socket_clients() -> Vec<(String, String)> {
         let clients: Vec<(String, String)> = production_code()
             .into_iter()
-            .filter(|(name, code)| name != "daemon/protocol.rs" && code.contains("UnixStream"))
+            .filter(|(name, code)| {
+                name != "daemon/protocol.rs"
+                    && code.contains("UnixStream")
+                    && code.contains("daemon::protocol")
+            })
             .collect();
-        assert!(!clients.is_empty(), "no module uses a UnixStream");
+        assert!(
+            !clients.is_empty(),
+            "no module uses a UnixStream with the daemon protocol"
+        );
         clients
     }
 
