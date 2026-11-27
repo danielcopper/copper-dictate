@@ -28,8 +28,8 @@ pub(crate) enum KeyboardError {
     Event(#[from] event::EventError),
     #[error("the input emulation's message is not understood: {0}")]
     Parse(String),
-    /// Traced in the portal's source, not checked on a device: both its "End" and a restart of
-    /// the portal arrive this way.
+    /// Traced in the portal's source, not checked on a device: a restart of the portal arrives
+    /// this way.
     #[error("the compositor ended the remote control session on purpose ({})", .0.as_deref().unwrap_or("no reason given"))]
     EndedOnPurpose(Option<String>),
     #[error("the compositor ended the input emulation ({})", .0.as_deref().unwrap_or("no reason given"))]

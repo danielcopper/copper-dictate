@@ -103,9 +103,10 @@ missing, it says once on stderr why it cannot insert and keeps dictating, with t
 final text that ends while the daemon's first remote-control session starts is not inserted either. When one insertion
 fails, the daemon puts the previous contents back where it can, says on stderr what failed and whether the paste key had
 been sent (then the text may be at the cursor all the same), and tries again with the next dictation. If the
-remote-control session has ended, that dictation opens a new one with the saved token. After the session was ended on
-purpose (its "End", or the portal closing it) or the permission was denied, also at the daemon's start, the daemon
-deletes the token, so the next dictation shows the dialog again, after a restart of the daemon as well.
+remote-control session has ended, that dictation opens a new one with the saved token. Plasma shows no "End" for this
+session in its tray: the remote control ends when the daemon stops. After the portal ended the session itself (when it
+restarts, for one) or the permission was denied, also at the daemon's start, the daemon deletes the token, so the next
+dictation shows the dialog again, after a restart of the daemon as well.
 
 ## Development
 
