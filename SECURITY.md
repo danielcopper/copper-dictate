@@ -38,3 +38,14 @@ copper-dictate runs as a daemon under your user and records from the default mic
 - **The socket** between `toggle` and the daemon lies in `$XDG_RUNTIME_DIR/copper-dictate/`, a directory only your user
   can open. The final text, or the error that ended the dictation, goes to the `toggle` that asked for it; the daemon
   keeps it only until a `toggle` takes it.
+- **Insertion at the cursor** (KDE Plasma on Wayland): the final text, without its control characters, is set as the
+  clipboard and the primary selection through the compositor's `ext-data-control`, marked so Klipper keeps no copy. Any
+  application on the desktop can read it there until the previous contents come back, at most `restore_timeout_ms` after
+  the paste key. Those previous contents (text, HTML, file lists and one image type, up to 64 MiB per selection) stay in
+  the daemon's memory, offered again, until another application sets that selection; contents marked for password
+  managers are neither kept nor offered again.
+- **Remote control**: the paste key goes through the desktop's RemoteDesktop portal, over the session bus, as a session
+  that may emulate a keyboard while the daemon runs; the daemon sends Shift+Insert and no other key. With "Allow
+  restoring on future sessions", the portal's token lies in `$XDG_STATE_HOME/copper-dictate/remote-desktop-token`
+  (`~/.local/state/copper-dictate/` when the variable is unset), a file and directory only your user can open; it lets a
+  later start open a session without asking. Without the file, the next start asks again.

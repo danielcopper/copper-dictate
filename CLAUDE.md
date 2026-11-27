@@ -39,14 +39,15 @@ opened by `> [!NOTE]` / `> Added by the maintainer.`
   the server clients (today the final server's; the live server's comes here too); `src/daemon.rs` the daemon, with
   `daemon/protocol.rs` (the socket path and the one-JSON-message-per-line framing, for every client of the socket) and
   `daemon/toggle.rs`; `config.rs`, `xdg.rs` and `log.rs` (every log line, which adds the `copper-dictate:` prefix) at
-  the top; `src/platform/` the platform parts (today the insertion on KDE Plasma, in `platform/kde.rs`). A directory's
-  module is the file beside it (`audio.rs` next to `audio/`), never a `mod.rs`. A library (`lib.rs`) comes once a second
-  binary or a test under `tests/` needs the modules.
+  the top; `src/platform/` the platform parts (today the insertion on KDE Plasma, which `platform/kde.rs` puts together
+  from the modules beside it). A directory's module is the file beside it (`audio.rs` next to `audio/`), never a
+  `mod.rs`. A library (`lib.rs`) comes once a second binary or a test under `tests/` needs the modules.
 - **Toolchain** `rust-toolchain.toml` is the one source for the Rust version; CI, mise and rustup all read it. The cargo
   tools and deno are pinned in `mise.toml`, and CI installs them from there.
 - **Lints** are denied in `Cargo.toml` (`[lints]`), not only in CI: clippy `all` and `pedantic`, and no `unwrap` or
   `expect` outside tests (`clippy.toml`). Fix a lint at its root; an `#[allow]` needs a reason the code cannot show.
-- **Dependencies** pass `cargo deny` (`deny.toml`): permissive licences only, no duplicate versions, crates.io only.
+- **Dependencies** pass `cargo deny` (`deny.toml`): permissive licences only, one version per crate except the skips
+  listed there, crates.io only.
 - **Release** is release-please: the version in `Cargo.toml` and `Cargo.lock` is its output, never edited by hand.
   `mise run build:release` packs the archive the release attaches, with `scripts/package.sh`.
 - **The pre-commit hook** formats the staged Rust files (rustfmt) and the staged Markdown files deno.json covers (deno

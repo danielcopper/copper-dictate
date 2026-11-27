@@ -31,7 +31,7 @@ wildcards = "deny"
 highlight = "all"
 deny = []
 skip = [
-    { crate = "syn@2.0.119", reason = "enumflags2_derive, the build-time derive macro of reis, is still on syn 2 beside the syn 3 of the rest" },
+    { crate = "syn@2.0.119", reason = "enumflags2_derive, the derive macro of reis's enumflags2 dependency, is still on syn 2 beside the syn 3 of the rest" },
 ]
 skip-tree = []
 
