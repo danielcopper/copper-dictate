@@ -1,9 +1,8 @@
 pub(crate) mod protocol;
 pub(crate) mod toggle;
 
-use std::fs::{self, DirBuilder};
+use std::fs;
 use std::io::{self, BufReader};
-use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +14,7 @@ use thiserror::Error;
 use crate::daemon::protocol::{ReadError, Reply, Request, read_message, write_message};
 use crate::log;
 use crate::session::{Outcome, Session};
+use crate::xdg;
 
 const ACCEPT_RETRY: Duration = Duration::from_millis(100);
 
@@ -32,11 +32,7 @@ pub(crate) fn bind(socket: &Path) -> Result<UnixListener, BindError> {
         source,
     };
     if let Some(dir) = socket.parent() {
-        DirBuilder::new()
-            .recursive(true)
-            .mode(0o700)
-            .create(dir)
-            .map_err(io_error)?;
+        xdg::create_private_dir(dir).map_err(io_error)?;
     }
     match UnixListener::bind(socket) {
         Err(error) if error.kind() == io::ErrorKind::AddrInUse => {

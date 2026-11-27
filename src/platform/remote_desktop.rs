@@ -1,9 +1,9 @@
 use std::collections::HashMap;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::future::poll_fn;
 use std::io::{self, Write};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
@@ -67,7 +67,7 @@ pub(crate) fn read_token(path: &Path) -> Option<String> {
 
 pub(crate) fn write_token(path: &Path, token: &str) -> io::Result<()> {
     if let Some(dir) = path.parent() {
-        DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        xdg::create_private_dir(dir)?;
     }
     OpenOptions::new()
         .write(true)
