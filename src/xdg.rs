@@ -1,8 +1,12 @@
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Looks up an environment variable; tests pass their own instead of the process's.
 pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
+
+pub(crate) fn app_dir(base: &Path) -> PathBuf {
+    base.join("copper-dictate")
+}
 
 pub(crate) fn config_home(env: Env<'_>) -> Option<PathBuf> {
     absolute(env("XDG_CONFIG_HOME"))

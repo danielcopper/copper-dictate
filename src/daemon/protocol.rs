@@ -15,7 +15,7 @@ const SOCKET_FILE: &str = "daemon.sock";
 
 pub(crate) fn socket_path(env: Env<'_>) -> Result<PathBuf, NoRuntimeDir> {
     xdg::runtime_dir(env)
-        .map(|dir| dir.join("copper-dictate").join(SOCKET_FILE))
+        .map(|dir| xdg::app_dir(&dir).join(SOCKET_FILE))
         .ok_or(NoRuntimeDir)
 }
 

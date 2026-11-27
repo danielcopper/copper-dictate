@@ -145,7 +145,7 @@ impl Default for InsertionSection {
 
 pub(crate) fn path(env: Env<'_>) -> Result<PathBuf, ConfigError> {
     let config_home = xdg::config_home(env).ok_or(ConfigError::NoConfigDir)?;
-    Ok(config_home.join("copper-dictate").join("config.toml"))
+    Ok(xdg::app_dir(&config_home).join("config.toml"))
 }
 
 pub(crate) fn load(path: &Path, env: Env<'_>) -> Result<Config, ConfigError> {

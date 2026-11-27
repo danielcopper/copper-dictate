@@ -42,7 +42,7 @@ pub(crate) struct RemoteDesktop {
 }
 
 pub(crate) fn token_path(env: Env<'_>) -> Option<PathBuf> {
-    xdg::state_home(env).map(|state| state.join("copper-dictate").join(TOKEN_FILE))
+    xdg::state_home(env).map(|state| xdg::app_dir(&state).join(TOKEN_FILE))
 }
 
 pub(crate) fn read_token(path: &Path) -> Option<String> {
